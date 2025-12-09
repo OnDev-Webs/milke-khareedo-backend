@@ -1,7 +1,9 @@
-const User = require('../models/User');
+const User = require('../models/user');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwt');
+const { OAuth2Client } = require('google-auth-library');
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // @desc    Register a new user
 // @route   POST /api/users/register
@@ -27,7 +29,8 @@ exports.register = async (req, res, next) => {
         const user = await User.create({
             name,
             email,
-            password: hashedPassword
+            password
+            // password: hashedPassword
         });
 
         // Generate JWT token
@@ -44,7 +47,8 @@ exports.register = async (req, res, next) => {
                 user: {
                     id: user._id,
                     name: user.name,
-                    email: user.email
+                    email: user.email,
+                    role: user.role
                 },
                 token
             }
@@ -93,7 +97,8 @@ exports.login = async (req, res, next) => {
                 user: {
                     id: user._id,
                     name: user.name,
-                    email: user.email
+                    email: user.email,
+                    role: user.role
                 },
                 token
             }
@@ -103,6 +108,53 @@ exports.login = async (req, res, next) => {
     }
 };
 
+// @desc    Login user
+// @route   POST /api/users/social-login/google
+// @access  Public
+exports.googleLogin = async (req, res, next) => {
+    try {
+        const { tokenId } = req.body; 
+        const ticket = await client.verifyIdToken({
+            idToken: tokenId,
+            audience: process.env.GOOGLE_CLIENT_ID
+        });
+        const payload = ticket.getPayload();
+        const { email, name } = payload;
+
+        // Check if user exists
+        let user = await User.findOne({ email });
+        if (!user) {
+            // Create new user
+            user = await User.create({
+                name,
+                email,
+                password: '', 
+            });
+        }
+
+        // Generate JWT token
+        const token = jwt.sign(
+            { userId: user._id, email: user.email },
+            jwtConfig.secret,
+            { expiresIn: jwtConfig.expiresIn }
+        );
+
+        res.json({
+            success: true,
+            message: 'Login successful',
+            data: {
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email
+                },
+                token
+            }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
 // @desc    Get current user profile
 // @route   GET /api/users/profile
 // @access  Private
