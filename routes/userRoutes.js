@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
 const { authenticate } = require('../middleware/auth');
-const { validate } = require('../middleware/validator');
+const validate = require('../middleware/validator');
 const { body } = require('express-validator');
 
 // Validation rules
@@ -20,6 +20,7 @@ const loginValidation = [
 // Routes
 router.post('/register', registerValidation, validate, userController.register);
 router.post('/login', loginValidation, validate, userController.login);
+router.post('/social-login/google', userController.googleLogin);
 router.get('/profile', authenticate, userController.getProfile);
 router.get('/', authenticate, userController.getAllUsers);
 router.get('/:id', authenticate, userController.getUserById);

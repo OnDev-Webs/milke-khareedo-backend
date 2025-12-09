@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const productController = require('../controllers/productController');
 const { authenticate } = require('../middleware/auth');
-const { validate } = require('../middleware/validator');
+const  validate = require('../middleware/validator');
 const { body } = require('express-validator');
 
 // Validation rules
