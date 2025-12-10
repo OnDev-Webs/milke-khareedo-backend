@@ -11,6 +11,8 @@ const productRoutes = require('./productRoutes');
 const propertyRoutes = require('./propertyRoutes');
 const developerRoutes = require('./developerRoutes');
 const adminProfileRoutes = require('./adminProfileRoutes');
+const userDashboardRoutes = require('./userDashboardRoutes');
+const homePageRoutes = require('./homePageRoutes');
 
 // Route definitions
 router.use('/users', userRoutes);
@@ -18,6 +20,8 @@ router.use('/products', productRoutes);
 router.use('/properties', propertyRoutes);
 router.use('/developers', developerRoutes);
 router.use('/admin_profile', adminProfileRoutes);
+router.use('/user_dashboard', userDashboardRoutes);
+router.use('/home', homePageRoutes);
 
 // API info route
 router.get('/', (req, res) => {
@@ -28,7 +32,7 @@ router.get('/', (req, res) => {
         endpoints: {
             users: '/api/users',
             products: '/api/products',
-            property: '/api/property'
+            property: '/api/property',
         }
     });
 });

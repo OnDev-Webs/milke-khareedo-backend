@@ -29,13 +29,13 @@ exports.register = async (req, res, next) => {
         const user = await User.create({
             name,
             email,
-            password
+            password,
             // password: hashedPassword
         });
 
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email },
+            { userId: user._id, email: user.email, role: user.role },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -85,7 +85,7 @@ exports.login = async (req, res, next) => {
 
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email },
+            { userId: user._id, email: user.email , role: user.role},
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -134,7 +134,7 @@ exports.googleLogin = async (req, res, next) => {
 
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email },
+            { userId: user._id, email: user.email , role: user.role},
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -175,6 +175,7 @@ exports.getProfile = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
+                    role: user.role,
                     createdAt: user.createdAt
                 }
             }
