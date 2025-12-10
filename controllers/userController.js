@@ -1,9 +1,98 @@
-const User = require('../models/user');
+const User = require('../models/User');
+const Role = require('../models/Role');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwt');
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// @desc    Register superadmin
+// @route   POST /api/users/superadmin/register
+// @access  Public
+exports.registerSuperAdmin = async (req, res, next) => {
+    try {
+        const { email, password } = req.body;
+
+        // Check if user already exists
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({
+                success: false,
+                message: 'User already exists with this email'
+            });
+        }
+
+        // Create superadmin role with all permissions set to true
+        const superAdminRole = await Role.create({
+            name: 'Super Admin',
+            permissions: {
+                property: {
+                    add: true,
+                    edit: true,
+                    view: true,
+                    delete: true
+                },
+                developer: {
+                    add: true,
+                    edit: true,
+                    view: true,
+                    delete: true
+                },
+                crm: {
+                    add: true,
+                    edit: true,
+                    view: true,
+                    delete: true,
+                    export: true
+                },
+                team: {
+                    add: true,
+                    edit: true,
+                    view: true,
+                    delete: true
+                }
+            }
+        });
+
+        // Create user with superadmin role
+        const user = await User.create({
+            name: 'Super Admin',
+            email,
+            password,
+            role: superAdminRole._id
+        });
+
+        // Populate role for response
+        await user.populate('role');
+
+        // Generate JWT token
+        const token = jwt.sign(
+            { userId: user._id, email: user.email, roleId: user.role._id },
+            jwtConfig.secret,
+            { expiresIn: jwtConfig.expiresIn }
+        );
+
+        res.status(201).json({
+            success: true,
+            message: 'Superadmin registered successfully',
+            data: {
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    role: {
+                        id: user.role._id,
+                        name: user.role.name,
+                        permissions: user.role.permissions
+                    }
+                },
+                token
+            }
+        });
+    } catch (error) {
+        next(error);
+    }
+};
 
 // @desc    Register a new user
 // @route   POST /api/users/register
@@ -25,17 +114,34 @@ exports.register = async (req, res, next) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
+        // Get default role or create one if needed
+        let defaultRole = await Role.findOne({ name: 'User' });
+        if (!defaultRole) {
+            defaultRole = await Role.create({
+                name: 'User',
+                permissions: {
+                    property: { add: false, edit: false, view: true, delete: false },
+                    developer: { add: false, edit: false, view: true, delete: false },
+                    crm: { add: false, edit: false, view: false, delete: false, export: false },
+                    team: { add: false, edit: false, view: false, delete: false }
+                }
+            });
+        }
+
         // Create user
         const user = await User.create({
             name,
             email,
             password,
-            // password: hashedPassword
+            role: defaultRole._id
         });
+
+        // Populate role
+        await user.populate('role');
 
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email, role: user.role },
+            { userId: user._id, email: user.email, roleId: user.role._id },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -48,7 +154,11 @@ exports.register = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
-                    role: user.role
+                    role: {
+                        id: user.role._id,
+                        name: user.role.name,
+                        permissions: user.role.permissions
+                    }
                 },
                 token
             }
@@ -83,9 +193,12 @@ exports.login = async (req, res, next) => {
             });
         }
 
+        // Populate role
+        await user.populate('role');
+
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email , role: user.role},
+            { userId: user._id, email: user.email, roleId: user.role._id },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -98,7 +211,11 @@ exports.login = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
-                    role: user.role
+                    role: {
+                        id: user.role._id,
+                        name: user.role.name,
+                        permissions: user.role.permissions
+                    }
                 },
                 token
             }
@@ -113,7 +230,7 @@ exports.login = async (req, res, next) => {
 // @access  Public
 exports.googleLogin = async (req, res, next) => {
     try {
-        const { tokenId } = req.body; 
+        const { tokenId } = req.body;
         const ticket = await client.verifyIdToken({
             idToken: tokenId,
             audience: process.env.GOOGLE_CLIENT_ID
@@ -124,17 +241,35 @@ exports.googleLogin = async (req, res, next) => {
         // Check if user exists
         let user = await User.findOne({ email });
         if (!user) {
+            // Get default role or create one if needed
+            let defaultRole = await Role.findOne({ name: 'User' });
+            if (!defaultRole) {
+                defaultRole = await Role.create({
+                    name: 'User',
+                    permissions: {
+                        property: { add: false, edit: false, view: true, delete: false },
+                        developer: { add: false, edit: false, view: true, delete: false },
+                        crm: { add: false, edit: false, view: false, delete: false, export: false },
+                        team: { add: false, edit: false, view: false, delete: false }
+                    }
+                });
+            }
+
             // Create new user
             user = await User.create({
                 name,
                 email,
-                password: '', 
+                password: '',
+                role: defaultRole._id
             });
         }
 
+        // Populate role
+        await user.populate('role');
+
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email , role: user.role},
+            { userId: user._id, email: user.email, roleId: user.role._id },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -146,7 +281,12 @@ exports.googleLogin = async (req, res, next) => {
                 user: {
                     id: user._id,
                     name: user.name,
-                    email: user.email
+                    email: user.email,
+                    role: {
+                        id: user.role._id,
+                        name: user.role.name,
+                        permissions: user.role.permissions
+                    }
                 },
                 token
             }
@@ -160,7 +300,7 @@ exports.googleLogin = async (req, res, next) => {
 // @access  Private
 exports.getProfile = async (req, res, next) => {
     try {
-        const user = await User.findById(req.user.userId);
+        const user = await User.findById(req.user.userId).populate('role');
         if (!user) {
             return res.status(404).json({
                 success: false,
@@ -175,7 +315,11 @@ exports.getProfile = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
-                    role: user.role,
+                    role: user.role ? {
+                        id: user.role._id,
+                        name: user.role.name,
+                        permissions: user.role.permissions
+                    } : null,
                     createdAt: user.createdAt
                 }
             }
@@ -190,7 +334,7 @@ exports.getProfile = async (req, res, next) => {
 // @access  Private
 exports.getAllUsers = async (req, res, next) => {
     try {
-        const users = await User.find().select('-password');
+        const users = await User.find().select('-password').populate('role');
         res.json({
             success: true,
             count: users.length,
@@ -206,7 +350,7 @@ exports.getAllUsers = async (req, res, next) => {
 // @access  Private
 exports.getUserById = async (req, res, next) => {
     try {
-        const user = await User.findById(req.params.id).select('-password');
+        const user = await User.findById(req.params.id).select('-password').populate('role');
         if (!user) {
             return res.status(404).json({
                 success: false,
@@ -232,7 +376,7 @@ exports.updateUser = async (req, res, next) => {
             req.params.id,
             req.body,
             { new: true, runValidators: true }
-        ).select('-password');
+        ).select('-password').populate('role');
 
         if (!user) {
             return res.status(404).json({

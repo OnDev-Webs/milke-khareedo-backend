@@ -18,6 +18,10 @@ const loginValidation = [
 ];
 
 // Routes
+router.post('/superadmin/register', [
+    body('email').isEmail().withMessage('Please provide a valid email'),
+    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
+], validate, userController.registerSuperAdmin);
 router.post('/register', registerValidation, validate, userController.register);
 router.post('/login', loginValidation, validate, userController.login);
 router.post('/social-login/google', userController.googleLogin);
