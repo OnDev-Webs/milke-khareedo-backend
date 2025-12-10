@@ -1,15 +1,28 @@
+const Developer = require('../models/developer');
 const Property = require('../models/property');
 const { uploadToS3 } = require("../utils/s3");
 
 // Create property
 exports.createProperty = async (req, res, next) => {
     try {
-        let { projectName, developer, location, projectSize, landParcel,
+        let { 
+            projectName, developer, location, projectSize, landParcel,
             possessionDate, developerPrice, groupPrice, minGroupMembers,
             reraId, possessionStatus, description, configurations,
-            highlights, amenities, layouts, connectivity, relationshipManager,
-            leadDistributionAgents, status } = req.body;
+            highlights, amenities, layouts, connectivity, 
+            relationshipManager, leadDistributionAgents, status 
+        } = req.body;
 
+        if (!developer) {
+            return res.status(400).json({ success: false, message: "Developer is required" });
+        }
+
+        const dev = await Developer.findById(developer);
+        if (!dev) {
+            return res.status(400).json({ success: false, message: "Invalid developer selected" });
+        }
+
+        // ------------------- Safe JSON parsing -------------------
         const safeJSON = (value, fallback) => {
             try {
                 if (!value) return fallback;
@@ -31,31 +44,20 @@ exports.createProperty = async (req, res, next) => {
         let uploadedLayouts = [];
         let uploadedQrImage = null;
 
-        // Upload Property Images
+        // Upload property images
         if (req.files?.images) {
-            const imagesFiles = Array.isArray(req.files.images)
-                ? req.files.images
-                : [req.files.images];
-
+            const imagesFiles = Array.isArray(req.files.images) ? req.files.images : [req.files.images];
             for (let file of imagesFiles) {
                 const url = await uploadToS3(file);
-                uploadedImages.push({
-                    url,
-                    isCover: false,
-                    order: uploadedImages.length + 1
-                });
+                uploadedImages.push({ url, isCover: false, order: uploadedImages.length + 1 });
             }
         }
 
-        // Upload Layout Images + map JSON data
+        // Upload layouts
         if (req.files?.layouts) {
-            const layoutFiles = Array.isArray(req.files.layouts)
-                ? req.files.layouts
-                : [req.files.layouts];
-
+            const layoutFiles = Array.isArray(req.files.layouts) ? req.files.layouts : [req.files.layouts];
             for (let i = 0; i < layoutFiles.length; i++) {
                 const url = await uploadToS3(layoutFiles[i]);
-
                 uploadedLayouts.push({
                     image: url,
                     carpetArea: layouts[i]?.carpetArea || null,
@@ -66,12 +68,8 @@ exports.createProperty = async (req, res, next) => {
             }
         }
 
-        // RERA QR image upload
         if (req.files?.reraQrImage) {
-            const qrFile = Array.isArray(req.files.reraQrImage)
-                ? req.files.reraQrImage[0]
-                : req.files.reraQrImage;
-
+            const qrFile = Array.isArray(req.files.reraQrImage) ? req.files.reraQrImage[0] : req.files.reraQrImage;
             uploadedQrImage = await uploadToS3(qrFile);
         }
 
@@ -90,16 +88,10 @@ exports.createProperty = async (req, res, next) => {
             possessionStatus,
             description,
             configurations,
-            images: uploadedImages.length > 0
-                ? uploadedImages
-                : safeJSON(req.body.images) || [],
-
+            images: uploadedImages.length > 0 ? uploadedImages : safeJSON(req.body.images) || [],
             highlights,
             amenities,
-            layouts: uploadedLayouts.length > 0
-                ? uploadedLayouts
-                : safeJSON(req.body.layouts) || [],
-
+            layouts: uploadedLayouts.length > 0 ? uploadedLayouts : safeJSON(req.body.layouts) || [],
             connectivity,
             relationshipManager,
             leadDistributionAgents,
