@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwt');
-const User = require('../models/User');
+const User = require('../models/user');
 
 // Authenticate JWT
 const authenticate = async (req, res, next) => {
@@ -98,4 +98,4 @@ const authorizeSuperAdmin = async (req, res, next) => {
     }
 };
 
-module.exports = { authenticate, authorizeAdmin, authorizeUser ,authorizeSuperAdmin };
+module.exports = { authenticate, authorizeAdmin, authorizeUser, authorizeSuperAdmin };
