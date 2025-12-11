@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authorizeAdmin } = require('../middleware/auth');
 const validate = require('../middleware/validator');
 const { body } = require('express-validator');
 
@@ -18,18 +18,15 @@ const loginValidation = [
 ];
 
 // Routes
-router.post('/superadmin/register', [
-    body('email').isEmail().withMessage('Please provide a valid email'),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
-], validate, userController.registerSuperAdmin);
 router.post('/register', registerValidation, validate, userController.register);
 router.post('/login', loginValidation, validate, userController.login);
 router.post('/social-login/google', userController.googleLogin);
 router.get('/profile', authenticate, userController.getProfile);
-router.get('/', authenticate, userController.getAllUsers);
-router.get('/:id', authenticate, userController.getUserById);
-router.put('/:id', authenticate, userController.updateUser);
-router.delete('/:id', authenticate, userController.deleteUser);
+
+router.get('/', authenticate, authorizeAdmin ,userController.getAllUsers);
+router.get('/:id', authenticate,authorizeAdmin, userController.getUserById);
+router.put('/:id', authenticate, authorizeAdmin,userController.updateUser);
+router.delete('/:id', authenticate,authorizeAdmin, userController.deleteUser);
 
 module.exports = router;
 

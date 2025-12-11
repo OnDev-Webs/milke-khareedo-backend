@@ -110,12 +110,22 @@ exports.registerVisit = async (req, res) => {
         const userId = req.user.userId;
         const { propertyId, visitDate, visitTime, message } = req.body;
 
+        // Validate property
         const property = await Property.findById(propertyId);
-
         if (!property) {
-            return res.json({ success: false, message: "Property not found" });
+            return res.status(404).json({ success: false, message: "Property not found" });
         }
 
+        // Parse visitDate
+        let parsedVisitDate = null;
+        if (visitDate) {
+            parsedVisitDate = new Date(visitDate);
+            if (isNaN(parsedVisitDate.getTime())) {
+                return res.status(400).json({ success: false, message: "Invalid visitDate format" });
+            }
+        }
+
+        // Check if activity already exists
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
@@ -124,7 +134,7 @@ exports.registerVisit = async (req, res) => {
 
         if (existingActivity) {
             existingActivity.visitedAt = new Date();
-            existingActivity.visitDate = visitDate;
+            if (parsedVisitDate) existingActivity.visitDate = parsedVisitDate;
             existingActivity.visitTime = visitTime;
             await existingActivity.save();
         } else {
@@ -133,11 +143,12 @@ exports.registerVisit = async (req, res) => {
                 propertyId,
                 activityType: "visited",
                 visitedAt: new Date(),
-                visitDate: new Date(visitDate),
+                visitDate: parsedVisitDate,
                 visitTime,
             });
         }
 
+        // Create lead
         await leadModal.create({
             userId,
             propertyId,
@@ -152,7 +163,8 @@ exports.registerVisit = async (req, res) => {
         });
 
     } catch (error) {
-        res.json({ success: false, message: error.message });
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 

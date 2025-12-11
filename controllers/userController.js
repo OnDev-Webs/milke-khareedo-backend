@@ -6,94 +6,6 @@ const jwtConfig = require('../config/jwt');
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// @desc    Register superadmin
-// @route   POST /api/users/superadmin/register
-// @access  Public
-exports.registerSuperAdmin = async (req, res, next) => {
-    try {
-        const { email, password } = req.body;
-
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
-        if (existingUser) {
-            return res.status(400).json({
-                success: false,
-                message: 'User already exists with this email'
-            });
-        }
-
-        // Create superadmin role with all permissions set to true
-        const superAdminRole = await Role.create({
-            name: 'Super Admin',
-            permissions: {
-                property: {
-                    add: true,
-                    edit: true,
-                    view: true,
-                    delete: true
-                },
-                developer: {
-                    add: true,
-                    edit: true,
-                    view: true,
-                    delete: true
-                },
-                crm: {
-                    add: true,
-                    edit: true,
-                    view: true,
-                    delete: true,
-                    export: true
-                },
-                team: {
-                    add: true,
-                    edit: true,
-                    view: true,
-                    delete: true
-                }
-            }
-        });
-
-        // Create user with superadmin role
-        const user = await User.create({
-            name: 'Super Admin',
-            email,
-            password,
-            role: superAdminRole._id
-        });
-
-        // Populate role for response
-        await user.populate('role');
-
-        // Generate JWT token
-        const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId: user.role._id },
-            jwtConfig.secret,
-            { expiresIn: jwtConfig.expiresIn }
-        );
-
-        res.status(201).json({
-            success: true,
-            message: 'Superadmin registered successfully',
-            data: {
-                user: {
-                    id: user._id,
-                    name: user.name,
-                    email: user.email,
-                    role: {
-                        id: user.role._id,
-                        name: user.role.name,
-                        permissions: user.role.permissions
-                    }
-                },
-                token
-            }
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
 // @desc    Register a new user
 // @route   POST /api/users/register
 // @access  Public
@@ -196,9 +108,12 @@ exports.login = async (req, res, next) => {
         // Populate role
         await user.populate('role');
 
+        const roleId = user.role?._id;  // optional chaining
+        const roleName = user.role?.name || 'user';
+
         // Generate JWT token
         const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId: user.role._id },
+            { userId: user._id, email: user.email, roleId, roleName },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
@@ -211,15 +126,16 @@ exports.login = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
-                    role: {
+                    role: user.role ? {
                         id: user.role._id,
                         name: user.role.name,
                         permissions: user.role.permissions
-                    }
+                    } : { id: null, name: 'user', permissions: {} }
                 },
                 token
             }
         });
+
     } catch (error) {
         next(error);
     }
@@ -416,4 +332,3 @@ exports.deleteUser = async (req, res, next) => {
         next(error);
     }
 };
-
