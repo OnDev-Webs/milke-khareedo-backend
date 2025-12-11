@@ -1,25 +1,17 @@
 const express = require('express');
 const router = express.Router();
 
-require('../models/developer');
-require('../models/property');
-
-
 // Import route files
 const userRoutes = require('./userRoutes');
+const adminRoutes = require('./adminRoutes');
 const productRoutes = require('./productRoutes');
-const propertyRoutes = require('./propertyRoutes');
-const developerRoutes = require('./developerRoutes');
-const adminProfileRoutes = require('./adminProfileRoutes');
 const userDashboardRoutes = require('./userDashboardRoutes');
 const homePageRoutes = require('./homePageRoutes');
 
 // Route definitions
 router.use('/users', userRoutes);
+router.use('/admin',adminRoutes);
 router.use('/products', productRoutes);
-router.use('/properties', propertyRoutes);
-router.use('/developers', developerRoutes);
-router.use('/admin_profile', adminProfileRoutes);
 router.use('/user_dashboard', userDashboardRoutes);
 router.use('/home', homePageRoutes);
 
