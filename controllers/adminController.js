@@ -165,6 +165,129 @@ exports.adminLogin = async (req, res, next) => {
     }
 };
 
+// GET /admin/profile
+exports.getAdminProfile = async (req, res) => {
+    try {
+        const adminId = req.user.userId;
+
+        const admin = await User.findById(adminId).select('-password');
+
+        if (!admin) {
+            return res.status(404).json({ success: false, message: "Admin not found" });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Admin profile fetched successfully",
+            data: admin
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// PUT /admin/profile
+exports.updateAdminProfile = async (req, res) => {
+    try {
+        const adminId = req.user.userId;
+        const { name, email } = req.body;
+        let profileImage = req.body.profileImage;
+
+        if (req.file) {
+            profileImage = await uploadToS3(req.file);
+        }
+
+        const updates = {};
+        if (name) updates.name = name;
+        if (email) updates.email = email;
+        if (profileImage) updates.profileImage = profileImage;
+
+        const updatedAdmin = await User.findByIdAndUpdate(adminId, updates, { new: true, runValidators: true }).select('-password');
+
+        res.status(200).json({
+            success: true,
+            message: "Profile updated successfully",
+            data: updatedAdmin
+        });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// POST /change-password
+exports.changePassword = async (req, res) => {
+    try {
+        const { oldPassword, newPassword, confirmPassword } = req.body;
+
+        if (!oldPassword || !newPassword || !confirmPassword) {
+            return res.status(400).json({ success: false, message: 'All fields are required' });
+        }
+
+        if (newPassword !== confirmPassword) {
+            return res.status(400).json({ success: false, message: 'New password and confirm password do not match' });
+        }
+
+        const user = await User.findById(req.user.userId).select('+password');
+        if (!user) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
+        const isMatch = await bcrypt.compare(oldPassword, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ success: false, message: 'Old password is incorrect' });
+        }
+
+        // ❌ DO NOT HASH MANUALLY
+        user.password = newPassword;
+
+        await user.save();
+
+        res.json({ success: true, message: 'Password changed successfully' });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+
+// USER MANAGEMENT SECTION
+exports.getAllUsers = async (req, res, next) => {
+    try {
+        const users = await User.find().select('-password').populate('role');
+        res.json({
+            success: true,
+            count: users.length,
+            data: users
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+exports.getUserById = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.params.id).select('-password').populate('role');
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: user
+        });
+    } catch (error) {
+        next(error);
+    }
+};
+
+
 // CREATE PROPERTY SECTION
 
 // ===================== CREATE PROPERTY =====================
@@ -175,19 +298,62 @@ exports.createProperty = async (req, res, next) => {
             possessionDate, developerPrice, groupPrice, minGroupMembers,
             reraId, possessionStatus, description, configurations,
             highlights, amenities, layouts, connectivity,
-            relationshipManager, leadDistributionAgents, status
+            relationshipManager, leadDistributionAgents,
+            isStatus
         } = req.body;
 
-        if (!developer) {
-            return res.status(400).json({ success: false, message: "Developer is required" });
-        }
-
+        // ---------- Developer Validation ----------
         const dev = await Developer.findById(developer);
         if (!dev) {
-            return res.status(400).json({ success: false, message: "Invalid developer selected" });
+            return res.status(400).json({
+                success: false,
+                message: "Invalid developer selected"
+            });
         }
 
-        // ------------------- Safe JSON parsing -------------------
+        // ---------- RM Validation (Role = project_manager) ----------
+        // Fetch Role ObjectId
+        const projectManagerRole = await Role.findOne({ name: "Project Manager" });
+
+        if (!projectManagerRole) {
+            return res.status(400).json({ success: false, message: "Role 'project_manager' not found" });
+        }
+
+        if (relationshipManager) {
+            const rm = await User.findOne({
+                _id: relationshipManager,
+                role: projectManagerRole._id
+            });
+            if (!rm) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid Relationship Manager (must have role 'project_manager')"
+                });
+            }
+        }
+
+        // ---------- Agents Validation (Role = agent) ----------
+        const agentRole = await Role.findOne({ name: "Agent" });
+
+        if (!agentRole) {
+            return res.status(400).json({ success: false, message: "Role 'agent' not found" });
+        }
+
+        if (leadDistributionAgents?.length > 0) {
+            const validAgents = await User.find({
+                _id: { $in: leadDistributionAgents },
+                role: agentRole._id
+            });
+
+            if (validAgents.length !== leadDistributionAgents.length) {
+                return res.status(400).json({
+                    success: false,
+                    message: "All lead distribution agents must have role 'agent'"
+                });
+            }
+        }
+
+        // ---------- Safe JSON Parsing ----------
         const safeJSON = (value, fallback) => {
             try {
                 if (!value) return fallback;
@@ -205,39 +371,39 @@ exports.createProperty = async (req, res, next) => {
         connectivity = safeJSON(connectivity, {});
         leadDistributionAgents = safeJSON(leadDistributionAgents, []);
 
+        // ---------- File Upload ----------
         let uploadedImages = [];
         let uploadedLayouts = [];
         let uploadedQrImage = null;
 
-        // Upload property images
         if (req.files?.images) {
-            const imagesFiles = Array.isArray(req.files.images) ? req.files.images : [req.files.images];
-            for (let file of imagesFiles) {
+            for (let file of req.files.images) {
                 const url = await uploadToS3(file);
-                uploadedImages.push({ url, isCover: false, order: uploadedImages.length + 1 });
+                uploadedImages.push({
+                    url,
+                    isCover: false,
+                    order: uploadedImages.length + 1
+                });
             }
         }
 
-        // Upload layouts
         if (req.files?.layouts) {
-            const layoutFiles = Array.isArray(req.files.layouts) ? req.files.layouts : [req.files.layouts];
-            for (let i = 0; i < layoutFiles.length; i++) {
-                const url = await uploadToS3(layoutFiles[i]);
+            for (let i = 0; i < req.files.layouts.length; i++) {
+                const url = await uploadToS3(req.files.layouts[i]);
+
                 uploadedLayouts.push({
                     image: url,
-                    carpetArea: layouts[i]?.carpetArea || null,
-                    builtUpArea: layouts[i]?.builtUpArea || null,
-                    price: layouts[i]?.price || null,
-                    availabilityStatus: layouts[i]?.availabilityStatus || "Available"
+                    configurationUnitType: layouts[i]?.configurationUnitType || null
                 });
             }
         }
 
         if (req.files?.reraQrImage) {
-            const qrFile = Array.isArray(req.files.reraQrImage) ? req.files.reraQrImage[0] : req.files.reraQrImage;
+            const qrFile = req.files.reraQrImage[0];
             uploadedQrImage = await uploadToS3(qrFile);
         }
 
+        // ---------- Create Property ----------
         const property = await Property.create({
             projectName,
             developer,
@@ -249,24 +415,37 @@ exports.createProperty = async (req, res, next) => {
             groupPrice,
             minGroupMembers,
             reraId,
-            reraQrImage: uploadedQrImage ? uploadedQrImage : req.body.reraQrImage,
+            reraQrImage: uploadedQrImage || req.body.reraQrImage,
             possessionStatus,
             description,
             configurations,
-            images: uploadedImages.length > 0 ? uploadedImages : safeJSON(req.body.images) || [],
+            images: uploadedImages,
             highlights,
             amenities,
-            layouts: uploadedLayouts.length > 0 ? uploadedLayouts : safeJSON(req.body.layouts) || [],
+            layouts: uploadedLayouts,
             connectivity,
             relationshipManager,
             leadDistributionAgents,
-            status
+            isStatus: isStatus ?? true
         });
 
+        // ---------- Extra Return Data ----------
+        const developers = await Developer.find().select("_id name");
+        const relationshipManagers = await User.find({ role: projectManagerRole._id }).select("_id name email");
+        const agents = await User.find({ role: agentRole._id }).select("_id name email");
+
+        // ---------- Response ----------
         res.status(201).json({
             success: true,
             message: "Property created successfully",
-            data: property,
+            data: {
+                property,
+                dropdownData: {
+                    developers,
+                    relationshipManagers,
+                    agents
+                }
+            }
         });
 
     } catch (error) {
@@ -304,13 +483,27 @@ exports.getAllProperties = async (req, res, next) => {
             .limit(limit)
             .sort({ createdAt: -1 });
 
+        const enhancedProperties = properties.map((property) => {
+            const p = property.toObject();
+
+            p.layouts = p.layouts.map((layout) => {
+                const config = p.configurations.find((c) => c.unitType === layout.configurationUnitType);
+                return {
+                    ...layout,
+                    configuration: config || null
+                };
+            });
+
+            return p;
+        });
+
         res.json({
             success: true,
-            data: properties,
+            data: enhancedProperties,
             total,
             page,
             totalPages: Math.ceil(total / limit),
-            count: properties.length,
+            count: enhancedProperties.length,
         });
 
     } catch (error) {
@@ -328,7 +521,25 @@ exports.getPropertyById = async (req, res, next) => {
         if (!property)
             return res.status(404).json({ success: false, message: 'Property not found' });
 
-        res.json({ success: true, data: property });
+        // Convert to plain object
+        const p = property.toObject();
+
+        p.layouts = p.layouts.map((layout) => {
+            const config = p.configurations.find(
+                (c) => c.unitType === layout.configurationUnitType
+            );
+
+            return {
+                ...layout,
+                configuration: config || null
+            };
+        });
+
+        res.json({
+            success: true,
+            data: p
+        });
+
     } catch (error) {
         next(error);
     }
@@ -341,7 +552,7 @@ exports.updateProperty = async (req, res, next) => {
             'possessionDate', 'developerPrice', 'groupPrice', 'minGroupMembers',
             'reraId', 'possessionStatus', 'description',
             'configurations', 'highlights', 'amenities',
-            'connectivity', 'relationshipManager', 'leadDistributionAgents', 'status'
+            'connectivity', 'relationshipManager', 'leadDistributionAgents', 'isStatus'
         ];
 
         const updates = {};
@@ -362,12 +573,60 @@ exports.updateProperty = async (req, res, next) => {
             }
         };
 
-        // 🔥 S3 Upload logic
+        updates.configurations = safeJSON(req.body.configurations, []);
+        updates.highlights = safeJSON(req.body.highlights, []);
+        updates.amenities = safeJSON(req.body.amenities, []);
+        updates.layouts = safeJSON(req.body.layouts, []);
+        updates.connectivity = safeJSON(req.body.connectivity, {});
+        updates.leadDistributionAgents = safeJSON(req.body.leadDistributionAgents, []);
+
+        // ---------- Role Validation ----------
+
+        // Relationship Manager
+        if (updates.relationshipManager) {
+            const projectManagerRole = await Role.findOne({ name: "Project Manager" });
+            if (!projectManagerRole) {
+                return res.status(400).json({ success: false, message: "Role 'Project Manager' not found" });
+            }
+
+            const rm = await User.findOne({
+                _id: updates.relationshipManager,
+                role: projectManagerRole._id
+            });
+            if (!rm) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid Relationship Manager (must have role 'Project Manager')"
+                });
+            }
+        }
+
+        // Lead Distribution Agents
+        if (updates.leadDistributionAgents.length > 0) {
+            const agentRole = await Role.findOne({ name: "Agent" });
+            if (!agentRole) {
+                return res.status(400).json({ success: false, message: "Role 'Agent' not found" });
+            }
+
+            const validAgents = await User.find({
+                _id: { $in: updates.leadDistributionAgents },
+                role: agentRole._id
+            });
+
+            if (validAgents.length !== updates.leadDistributionAgents.length) {
+                return res.status(400).json({
+                    success: false,
+                    message: "All lead distribution agents must have role 'Agent'"
+                });
+            }
+        }
+
+        // ---------- File Uploads ----------
+
         let uploadedImages = [];
         let uploadedLayouts = [];
         let uploadedQrImage = null;
 
-        // Images
         if (req.files?.images) {
             for (let i = 0; i < req.files.images.length; i++) {
                 const url = await uploadToS3(req.files.images[i]);
@@ -380,27 +639,24 @@ exports.updateProperty = async (req, res, next) => {
             updates.images = uploadedImages;
         }
 
-        // Layouts
-        const layoutsFromBody = safeJSON(req.body.layouts, []);
         if (req.files?.layouts) {
+            const layoutsFromBody = updates.layouts;
             for (let i = 0; i < req.files.layouts.length; i++) {
                 const url = await uploadToS3(req.files.layouts[i]);
                 uploadedLayouts.push({
                     image: url,
-                    carpetArea: layoutsFromBody[i]?.carpetArea || null,
-                    builtUpArea: layoutsFromBody[i]?.builtUpArea || null,
-                    price: layoutsFromBody[i]?.price || null,
-                    availabilityStatus: layoutsFromBody[i]?.availabilityStatus || "Available"
+                    configurationUnitType: layoutsFromBody[i]?.configurationUnitType || null
                 });
             }
             updates.layouts = uploadedLayouts;
         }
 
-        // RERA QR Image
         if (req.files?.reraQrImage) {
             uploadedQrImage = await uploadToS3(req.files.reraQrImage[0]);
             updates.reraQrImage = uploadedQrImage;
         }
+
+        // ---------- Update Property ----------
 
         const property = await Property.findByIdAndUpdate(
             req.params.id,
@@ -610,8 +866,10 @@ exports.deleteDeveloper = async (req, res, next) => {
 // GET LEADS LIST
 exports.getLeadsList = async (req, res) => {
     try {
+        const filter = {};
+
         if (req.user.roleName.toLowerCase() === 'user') {
-            return res.status(403).json({ success: false, message: 'Access denied, admin only' });
+            filter.userId = req.user.userId;
         }
 
         const page = parseInt(req.query.page) || 1;
@@ -734,6 +992,40 @@ exports.deleteLead = async (req, res) => {
         });
     }
 };
+
+
+
+exports.getAgentRoles = async (req, res) => {
+    try {
+        const agentRole = await Role.findOne({ name: "Agent" });
+        const roles = await User.find({ role: agentRole._id });
+
+        res.json({
+            success: true,
+            count: roles.length,
+            data: roles
+        });
+    } catch (error) {
+        res.json({ success: false, message: error.message });
+    }
+};
+
+
+exports.getRelationshipManagers = async (req, res) => {
+    try {
+        const project_manager = await Role.findOne({ name: "Project Manager" });
+        const roles = await User.find({ role: project_manager._id });
+
+        res.json({
+            success: true,
+            count: roles.length,
+            data: roles
+        });
+    } catch (error) {
+        res.json({ success: false, message: error.message });
+    }
+};
+
 
 // ROLE SECTION 
 

@@ -10,6 +10,7 @@ router.get('/dashboard', authenticate, authorizeUser, userDashboardController.ge
 router.post('/property/view', authenticate, userDashboardController.addViewedProperty);
 router.post('/property/favorite', authenticate, userDashboardController.toggleFavoriteProperty);
 router.post('/property/visit', authenticate, userDashboardController.registerVisit);
+router.put('/property/update_visit/:leadId', authenticate, userDashboardController.registerUpdateVisit);
 
 router.post('/search', authenticate, userDashboardController.addSearchHistory);
 router.get('/get_search', authenticate, authorizeUser ,userDashboardController.getSearchHistory);

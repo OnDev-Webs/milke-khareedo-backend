@@ -84,7 +84,7 @@ const authorizeSuperAdmin = async (req, res, next) => {
             return res.status(401).json({ success: false, message: 'User not found' });
         }
 
-        if (!user.role || user.role.name.toLowerCase() !== 'superadmin') {
+        if (!user.role || user.role.name !== 'Super Admin') {
             return res.status(403).json({
                 success: false,
                 message: 'Access denied, super admin only'
