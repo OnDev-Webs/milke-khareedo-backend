@@ -26,6 +26,8 @@ router.post('/change_password', authenticate, authorizeAdmin ,adminController.ch
 
 // ADMIN DASHBOARD ROUTES
 router.get('/admin_dashboard', authenticate, authorizeAdmin, adminController.getAdminDashboard);
+router.get('/dashboard/recent-leads', authenticate, adminController.getRecentLeads);
+router.get('/leads/filter', authenticate, adminController.getFilteredLeads);
 
 // USER MANAGEMENT ROUTES
 router.get('/get_all_user', authenticate, authorizeAdmin ,adminController.getAllUsers);

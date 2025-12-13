@@ -98,4 +98,22 @@ const authorizeSuperAdmin = async (req, res, next) => {
     }
 };
 
-module.exports = { authenticate, authorizeAdmin, authorizeUser, authorizeSuperAdmin };
+const optionalAuthenticate = (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return next(); // 🔓 no token → allow search
+        }
+
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, jwtConfig.secret);
+
+        req.user = decoded; // { userId, role, etc }
+        next();
+    } catch (error) {
+        next(); // ❗ invalid token → ignore & continue
+    }
+};
+
+module.exports = { authenticate, authorizeAdmin, authorizeUser, authorizeSuperAdmin ,optionalAuthenticate};

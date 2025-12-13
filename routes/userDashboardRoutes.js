@@ -12,7 +12,6 @@ router.post('/property/favorite', authenticate, userDashboardController.toggleFa
 router.post('/property/visit', authenticate, userDashboardController.registerVisit);
 router.put('/property/update_visit/:leadId', authenticate, userDashboardController.registerUpdateVisit);
 
-router.post('/search', authenticate, userDashboardController.addSearchHistory);
 router.get('/get_search', authenticate, authorizeUser ,userDashboardController.getSearchHistory);
 
 router.post("/contact_preferences", authenticate,authorizeUser, userDashboardController.saveContactPreferences);  // Create/Update

@@ -1289,3 +1289,129 @@ exports.getAdminDashboard = async (req, res, next) => {
         next(error);
     }
 };
+
+exports.getRecentLeads = async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 5;
+
+        const filter = {};
+        if (req.user.roleName?.toLowerCase() === 'user') {
+            filter.userId = req.user.userId;
+        }
+
+        const leads = await leadModal.find(filter)
+            .populate({
+                path: "propertyId",
+                select: "name projectName location relationshipManager",
+                populate: { path: "relationshipManager", select: "name" }
+            })
+            .populate({
+                path: "userId",
+                select: "name email phone profileImage" 
+            })
+            .sort({ createdAt: -1 })   
+            .limit(limit);
+
+        const data = leads.map(item => ({
+            leadId: item._id,
+            userName: item.userId?.name || "",
+            userPhone: item.userId?.phone || "",
+            userProfileImage: item.userId?.profileImage || "", 
+            propertyName: item.propertyId?.name || "",
+            projectName: item.propertyId?.projectName || "",
+            location: item.propertyId?.location || "",
+            relationshipManager: item.propertyId?.relationshipManager?.name || "",
+            status: item.status || "Pending",
+            createdAt: item.createdAt
+        }));
+
+        res.json({
+            success: true,
+            message: "Recent leads fetched",
+            data
+        });
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getFilteredLeads = async (req, res) => {
+    try {
+        const { type, fromDate, toDate, page = 1, limit = 10 } = req.query;
+
+        const filter = {};
+
+        // 🔐 Role based
+        if (req.user.roleName?.toLowerCase() === 'user') {
+            filter.userId = req.user.userId;
+        }
+
+        // 📅 Date filters
+        const start = new Date();
+        const end = new Date();
+
+        if (type === 'today') {
+            start.setHours(0, 0, 0, 0);
+            end.setHours(23, 59, 59, 999);
+            filter.createdAt = { $gte: start, $lte: end };
+        }
+
+        if (type === 'yesterday') {
+            start.setDate(start.getDate() - 1);
+            start.setHours(0, 0, 0, 0);
+            end.setDate(end.getDate() - 1);
+            end.setHours(23, 59, 59, 999);
+            filter.createdAt = { $gte: start, $lte: end };
+        }
+
+        if (type === 'custom' && fromDate && toDate) {
+            filter.createdAt = {
+                $gte: new Date(fromDate),
+                $lte: new Date(toDate)
+            };
+        }
+
+        const skip = (page - 1) * limit;
+
+        const total = await leadModal.countDocuments(filter);
+
+        const leads = await leadModal.find(filter)
+            .populate({
+                path: "propertyId",
+                select: "name projectName location relationshipManager",
+                populate: { path: "relationshipManager", select: "name" }
+            })
+            .populate("userId", "name email phone")
+            .sort({ createdAt: -1 }) // 🔥 latest first
+            .skip(skip)
+            .limit(parseInt(limit));
+
+        const data = leads.map(item => ({
+            leadId: item._id,
+            userName: item.userId?.name,
+            phone: item.userId?.phone,
+            propertyName: item.propertyId?.name,
+            projectName: item.propertyId?.projectName,
+            location: item.propertyId?.location,
+            relationshipManager: item.propertyId?.relationshipManager?.name || "",
+            status: item.status || "Pending",
+            createdAt: item.createdAt
+        }));
+
+        res.json({
+            success: true,
+            message: "Filtered leads fetched",
+            data,
+            pagination: {
+                total,
+                page: Number(page),
+                limit: Number(limit),
+                totalPages: Math.ceil(total / limit)
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};

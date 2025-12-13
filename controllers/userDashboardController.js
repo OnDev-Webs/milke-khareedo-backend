@@ -108,7 +108,7 @@ exports.toggleFavoriteProperty = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime } = req.body;
+        const { propertyId, visitDate, visitTime ,source = "origin" } = req.body;
 
         // Validate property
         const property = await Property.findById(propertyId).populate('relationshipManager');
@@ -195,57 +195,48 @@ exports.registerUpdateVisit = async (req, res) => {
     }
 };
 
-exports.addSearchHistory = async (req, res) => {
-    try {
-        const userId = req.user.userId;
-        const { searchQuery, location, budgetMin, budgetMax } = req.body;
-
-        // Duplicate check
-        const existing = await UserSearchHistory.findOne({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
-        });
-
-        if (existing) {
-            return res.json({
-                success: true,
-                message: 'Search already exists',
-                data: existing
-            });
-        }
-
-        // Add new search
-        const newSearch = await UserSearchHistory.create({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
-        });
-
-        res.json({ success: true, message: 'Search added successfully', data: newSearch });
-
-    } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
-    }
-};
-
 exports.getSearchHistory = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        const searches = await UserSearchHistory.find({ userId })
-            .sort({ createdAt: -1 });
+        const searches = await UserSearchHistory.find({ userId }).sort({ createdAt: -1 });
 
         const grouped = {};
-        searches.forEach(s => {
+        for (const s of searches) {
             const date = s.createdAt.toLocaleDateString();
+
+            const topProperties = await UserPropertyActivity.aggregate([
+                { $match: { activityType: "visited" } },
+                {
+                    $lookup: {
+                        from: "properties",
+                        localField: "propertyId",
+                        foreignField: "_id",
+                        as: "property"
+                    }
+                },
+                { $unwind: "$property" },
+                {
+                    $match: {
+                        ...(s.searchQuery ? { "property.projectName": { $regex: s.searchQuery, $options: "i" } } : {}),
+                        ...(s.location ? { "property.location": s.location } : {}),
+                        ...(s.developer ? { "property.developer": new mongoose.Types.ObjectId(s.developer) } : {})
+                    }
+                },
+                {
+                    $group: {
+                        _id: "$propertyId",
+                        visitCount: { $sum: 1 },
+                        lastVisitedAt: { $max: "$visitedAt" },
+                        property: { $first: "$property" }
+                    }
+                },
+                { $sort: { visitCount: -1, lastVisitedAt: -1 } }
+            ]);
+
             if (!grouped[date]) grouped[date] = [];
-            grouped[date].push(s);
-        });
+            grouped[date].push({ ...s._doc, topProperties });
+        }
 
         res.json({ success: true, message: 'Search history fetched', data: grouped });
     } catch (error) {
@@ -253,7 +244,6 @@ exports.getSearchHistory = async (req, res) => {
     }
 };
 
-// CREATE / UPDATE
 exports.saveContactPreferences = async (req, res) => {
     try {
         const userId = req.user._id;
