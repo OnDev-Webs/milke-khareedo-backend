@@ -2,43 +2,74 @@ const leadModal = require('../models/leadModal');
 const Property = require('../models/property');
 const UserPropertyActivity = require('../models/userPropertyActivity');
 const UserSearchHistory = require('../models/userSearchHistory');
+const mongoose = require('mongoose');
 
-exports.getAllProperties = async (req, res, next) => {
+exports.getTopVisitedProperties = async (req, res, next) => {
     try {
-        let { page = 1, limit = 12, search, city, developer, status } = req.query;
+        let { page = 1, limit = 10, developer, projectName, possessionStatus, location, unitType } = req.query;
         page = parseInt(page);
         limit = parseInt(limit);
+        const skip = (page - 1) * limit;
 
-        const filters = {};
+        const tabFilter = {};
+        if (developer) tabFilter["property.developer"] = new mongoose.Types.ObjectId(developer);
+        if (projectName) tabFilter["property.projectName"] = { $regex: projectName, $options: "i" };
+        if (possessionStatus) tabFilter["property.possessionStatus"] = possessionStatus;
+        if (location) tabFilter["property.location"] = location;
+        if (unitType) tabFilter["property.configurations"] = { $elemMatch: { unitType: unitType } };
 
-        if (city) filters.location = city;
-        if (developer) filters.developer = developer;
-        if (status) filters.status = status;
+        const result = await UserPropertyActivity.aggregate([
+            { $match: { activityType: "visited" } },
 
-        if (search) {
-            filters.$or = [
-                { projectName: { $regex: search, $options: 'i' } },
-                { 'developer.name': { $regex: search, $options: 'i' } }
-            ];
-        }
+            {
+                $group: {
+                    _id: "$propertyId",
+                    visitCount: { $sum: 1 },
+                    lastVisitedAt: { $max: "$visitedAt" }
+                }
+            },
 
-        const total = await Property.countDocuments(filters);
+            { $sort: { visitCount: -1, lastVisitedAt: -1 } },
 
-        const properties = await Property.find(filters)
-            .populate('developer', 'name')
-            .populate('relationshipManager', 'name')
-            .populate('leadDistributionAgents', 'name')
-            .skip((page - 1) * limit)
-            .limit(limit)
-            .sort({ createdAt: -1 });
+            {
+                $lookup: {
+                    from: "properties",
+                    localField: "_id",
+                    foreignField: "_id",
+                    as: "property"
+                }
+            },
+
+            { $unwind: { path: "$property", preserveNullAndEmptyArrays: false } },
+
+            ...(Object.keys(tabFilter).length ? [{ $match: tabFilter }] : []),
+
+            {
+                $facet: {
+                    data: [
+                        { $skip: skip },
+                        { $limit: limit }
+                    ],
+                    totalCount: [
+                        { $count: "count" }
+                    ]
+                }
+            }
+        ]);
+
+        const data = result[0].data;
+        const total = result[0].totalCount[0]?.count || 0;
 
         res.json({
             success: true,
-            data: properties,
-            total,
-            page,
-            totalPages: Math.ceil(total / limit),
-            count: properties.length,
+            type: "TOP_VISITED",
+            data,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit)
+            }
         });
 
     } catch (error) {
@@ -46,17 +77,31 @@ exports.getAllProperties = async (req, res, next) => {
     }
 };
 
-exports.getPropertyById = async (req, res, next) => {
+// controllers/homePageController.js
+exports.getTopPropertyById = async (req, res, next) => {
     try {
-        const property = await Property.findById(req.params.id)
-            .populate('developer')
-            .populate('relationshipManager')
-            .populate('leadDistributionAgents');
+        const { id } = req.params;
 
-        if (!property)
-            return res.status(404).json({ success: false, message: 'Property not found' });
+        // Validate ObjectId
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ success: false, message: "Invalid property ID" });
+        }
 
-        res.json({ success: true, data: property });
+        // Find property by ID
+        const property = await Property.findById(id)
+            .populate('developer', 'name')
+            .populate('relationshipManager', 'name')
+            .populate('leadDistributionAgents', 'name');
+
+        if (!property) {
+            return res.status(404).json({ success: false, message: "Property not found" });
+        }
+
+        res.json({
+            success: true,
+            data: property
+        });
+
     } catch (error) {
         next(error);
     }
@@ -128,14 +173,21 @@ exports.toggleFavoriteProperty = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime, message } = req.body;
+        const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
 
-        const property = await Property.findById(propertyId);
-
+        // Validate property
+        const property = await Property.findById(propertyId).populate('relationshipManager');
         if (!property) {
-            return res.json({ success: false, message: "Property not found" });
+            return res.status(404).json({ success: false, message: "Property not found" });
         }
 
+        // Parse visitDate
+        let parsedVisitDate = visitDate ? new Date(visitDate) : null;
+        if (visitDate && isNaN(parsedVisitDate.getTime())) {
+            return res.status(400).json({ success: false, message: "Invalid visitDate format" });
+        }
+
+        // Create or update visit activity
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
@@ -144,8 +196,10 @@ exports.registerVisit = async (req, res) => {
 
         if (existingActivity) {
             existingActivity.visitedAt = new Date();
-            existingActivity.visitDate = visitDate;
+            if (parsedVisitDate) existingActivity.visitDate = parsedVisitDate;
             existingActivity.visitTime = visitTime;
+            existingActivity.source = source || "origin";
+            existingActivity.updatedBy = userId;
             await existingActivity.save();
         } else {
             await UserPropertyActivity.create({
@@ -153,17 +207,24 @@ exports.registerVisit = async (req, res) => {
                 propertyId,
                 activityType: "visited",
                 visitedAt: new Date(),
-                visitDate: new Date(visitDate),
+                visitDate: parsedVisitDate,
                 visitTime,
+                source: source || "origin",
+                updatedBy: userId,
+                isStatus: true
             });
         }
 
+        // Create lead (minimal fields only)
         await leadModal.create({
             userId,
             propertyId,
-            rmEmail: property.rmEmail,
-            rmPhone: property.rmPhone,
-            message
+            relationshipManagerId: property.relationshipManager?._id,
+            rmEmail: property.relationshipManager?.email || "",
+            rmPhone: property.relationshipManager?.phone || "",
+            isStatus: true,
+            source: source || "origin",
+            updatedBy: userId
         });
 
         res.json({
@@ -172,44 +233,85 @@ exports.registerVisit = async (req, res) => {
         });
 
     } catch (error) {
-        res.json({ success: false, message: error.message });
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 
-exports.addSearchHistory = async (req, res) => {
+exports.addSearchHistory = async (req, res, next) => {
     try {
-        const userId = req.user.userId;
-        const { searchQuery, location, budgetMin, budgetMax } = req.body;
+        const userId = req.user?.userId; 
+        const { searchQuery, location, developer, projectName } = req.body;
 
-        // Duplicate check
-        const existing = await UserSearchHistory.findOne({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
-        });
+        const trimmedSearchQuery = searchQuery?.trim();
+        const trimmedProjectName = projectName?.trim();
+        const trimmedLocation = location?.trim();
 
-        if (existing) {
-            return res.json({
-                success: true,
-                message: 'Search already exists',
-                data: existing
+        let searchData = null;
+
+        if (userId) {
+            // Duplicate check
+            const existing = await UserSearchHistory.findOne({
+                userId,
+                searchQuery: trimmedSearchQuery,
+                projectName: trimmedProjectName,
+                ...(trimmedLocation ? { location: trimmedLocation } : {}),
+                ...(developer ? { developer: new mongoose.Types.ObjectId(developer) } : {})
             });
+
+            if (existing) {
+                searchData = existing;
+            } else {
+                // Save new search
+                searchData = await UserSearchHistory.create({
+                    userId,
+                    searchQuery: trimmedSearchQuery,
+                    location: trimmedLocation,
+                    developer,
+                    projectName: trimmedProjectName
+                });
+            }
         }
 
-        // Add new search
-        const newSearch = await UserSearchHistory.create({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
+        const topProperties = await UserPropertyActivity.aggregate([
+            { $match: { activityType: "visited" } },
+            {
+                $lookup: {
+                    from: "properties",
+                    localField: "propertyId",
+                    foreignField: "_id",
+                    as: "property"
+                }
+            },
+            { $unwind: "$property" },
+            {
+                $match: {
+                    ...(trimmedSearchQuery || trimmedProjectName
+                        ? { "property.projectName": { $regex: trimmedSearchQuery || trimmedProjectName, $options: "i" } }
+                        : {}),
+                    ...(trimmedLocation ? { "property.location": trimmedLocation } : {}),
+                    ...(developer ? { "property.developer": new mongoose.Types.ObjectId(developer) } : {})
+                }
+            },
+            {
+                $group: {
+                    _id: "$propertyId",
+                    visitCount: { $sum: 1 },
+                    lastVisitedAt: { $max: "$visitedAt" },
+                    property: { $first: "$property" }
+                }
+            },
+            { $sort: { visitCount: -1, lastVisitedAt: -1 } }
+        ]);
+
+        res.json({
+            success: true,
+            message: userId ? "Search added successfully" : "Search executed successfully",
+            searchData, 
+            topProperties
         });
 
-        res.json({ success: true, message: 'Search added successfully', data: newSearch });
-
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        next(error);
     }
 };

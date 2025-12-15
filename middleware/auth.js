@@ -84,7 +84,7 @@ const authorizeSuperAdmin = async (req, res, next) => {
             return res.status(401).json({ success: false, message: 'User not found' });
         }
 
-        if (!user.role || user.role.name.toLowerCase() !== 'superadmin') {
+        if (!user.role || user.role.name !== 'Super Admin') {
             return res.status(403).json({
                 success: false,
                 message: 'Access denied, super admin only'
@@ -98,4 +98,22 @@ const authorizeSuperAdmin = async (req, res, next) => {
     }
 };
 
-module.exports = { authenticate, authorizeAdmin, authorizeUser, authorizeSuperAdmin };
+const optionalAuthenticate = (req, res, next) => {
+    try {
+        const authHeader = req.headers.authorization;
+
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return next(); // 🔓 no token → allow search
+        }
+
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, jwtConfig.secret);
+
+        req.user = decoded; // { userId, role, etc }
+        next();
+    } catch (error) {
+        next(); // ❗ invalid token → ignore & continue
+    }
+};
+
+module.exports = { authenticate, authorizeAdmin, authorizeUser, authorizeSuperAdmin ,optionalAuthenticate};

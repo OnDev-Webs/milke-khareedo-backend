@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
-const { authenticate, authorizeAdmin } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const validate = require('../middleware/validator');
 const { body } = require('express-validator');
+const upload = require('../utils/multer');
 
 // Validation rules
 const registerValidation = [
@@ -23,10 +24,8 @@ router.post('/login', loginValidation, validate, userController.login);
 router.post('/social-login/google', userController.googleLogin);
 router.get('/profile', authenticate, userController.getProfile);
 
-router.get('/', authenticate, authorizeAdmin ,userController.getAllUsers);
-router.get('/:id', authenticate,authorizeAdmin, userController.getUserById);
-router.put('/:id', authenticate, authorizeAdmin,userController.updateUser);
-router.delete('/:id', authenticate,authorizeAdmin, userController.deleteUser);
+router.put('/:id', authenticate, upload.single('profileImage'), userController.updateUser);
+router.delete('/:id', authenticate, userController.deleteUser);
 
 module.exports = router;
 

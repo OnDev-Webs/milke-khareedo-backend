@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwt');
 const { OAuth2Client } = require('google-auth-library');
+const { uploadToS3 } = require('../utils/s3');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // @desc    Register a new user
@@ -11,7 +12,7 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 // @access  Public
 exports.register = async (req, res, next) => {
     try {
-        const { name, email, password } = req.body;
+        const { name, email, password, phone } = req.body;
 
         // Check if user already exists
         const existingUser = await User.findOne({ email });
@@ -19,6 +20,14 @@ exports.register = async (req, res, next) => {
             return res.status(400).json({
                 success: false,
                 message: 'User already exists with this email'
+            });
+        }
+
+        // Validate phone
+        if (!phone || phone.length !== 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'Phone number must be 10 digits'
             });
         }
 
@@ -44,6 +53,7 @@ exports.register = async (req, res, next) => {
         const user = await User.create({
             name,
             email,
+            phone,
             password,
             role: defaultRole._id
         });
@@ -66,6 +76,7 @@ exports.register = async (req, res, next) => {
                     id: user._id,
                     name: user.name,
                     email: user.email,
+                    phone: user.phone,
                     role: {
                         id: user.role._id,
                         name: user.role.name,
@@ -245,69 +256,35 @@ exports.getProfile = async (req, res, next) => {
     }
 };
 
-// @desc    Get all users
-// @route   GET /api/users
-// @access  Private
-exports.getAllUsers = async (req, res, next) => {
-    try {
-        const users = await User.find().select('-password').populate('role');
-        res.json({
-            success: true,
-            count: users.length,
-            data: users
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
-// @desc    Get user by ID
-// @route   GET /api/users/:id
-// @access  Private
-exports.getUserById = async (req, res, next) => {
-    try {
-        const user = await User.findById(req.params.id).select('-password').populate('role');
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        res.json({
-            success: true,
-            data: user
-        });
-    } catch (error) {
-        next(error);
-    }
-};
-
 // @desc    Update user
 // @route   PUT /api/users/:id
 // @access  Private
 exports.updateUser = async (req, res, next) => {
     try {
-        const user = await User.findByIdAndUpdate(
-            req.params.id,
-            req.body,
-            { new: true, runValidators: true }
-        ).select('-password').populate('role');
+        const userId = req.user.userId;
+        const { name, email } = req.body;
+        let profileImage = req.body.profileImage;
 
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
+        if (req.file) {
+            profileImage = await uploadToS3(req.file);
         }
 
-        res.json({
+        const updates = {};
+        if (name) updates.name = name;
+        if (email) updates.email = email;
+        if (profileImage) updates.profileImage = profileImage;
+
+        const updatedUser = await User.findByIdAndUpdate(userId, updates, { new: true, runValidators: true }).select('-password');
+
+        res.status(200).json({
             success: true,
-            message: 'User updated successfully',
-            data: user
+            message: "Profile updated successfully",
+            data: updatedUser
         });
+
     } catch (error) {
-        next(error);
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 

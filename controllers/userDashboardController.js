@@ -108,24 +108,21 @@ exports.toggleFavoriteProperty = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime, message } = req.body;
+        const { propertyId, visitDate, visitTime ,source = "origin" } = req.body;
 
         // Validate property
-        const property = await Property.findById(propertyId);
+        const property = await Property.findById(propertyId).populate('relationshipManager');
         if (!property) {
             return res.status(404).json({ success: false, message: "Property not found" });
         }
 
         // Parse visitDate
-        let parsedVisitDate = null;
-        if (visitDate) {
-            parsedVisitDate = new Date(visitDate);
-            if (isNaN(parsedVisitDate.getTime())) {
-                return res.status(400).json({ success: false, message: "Invalid visitDate format" });
-            }
+        let parsedVisitDate = visitDate ? new Date(visitDate) : null;
+        if (visitDate && isNaN(parsedVisitDate.getTime())) {
+            return res.status(400).json({ success: false, message: "Invalid visitDate format" });
         }
 
-        // Check if activity already exists
+        // Create or update visit activity
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
@@ -136,6 +133,8 @@ exports.registerVisit = async (req, res) => {
             existingActivity.visitedAt = new Date();
             if (parsedVisitDate) existingActivity.visitDate = parsedVisitDate;
             existingActivity.visitTime = visitTime;
+            existingActivity.source = source || "origin";
+            existingActivity.updatedBy = userId;
             await existingActivity.save();
         } else {
             await UserPropertyActivity.create({
@@ -145,16 +144,22 @@ exports.registerVisit = async (req, res) => {
                 visitedAt: new Date(),
                 visitDate: parsedVisitDate,
                 visitTime,
+                source: source || "origin",
+                updatedBy: userId,
+                isStatus: true
             });
         }
 
-        // Create lead
+        // Create lead (minimal fields only)
         await leadModal.create({
             userId,
             propertyId,
-            rmEmail: property.rmEmail,
-            rmPhone: property.rmPhone,
-            message
+            relationshipManagerId: property.relationshipManager?._id,
+            rmEmail: property.relationshipManager?.email || "",
+            rmPhone: property.relationshipManager?.phone || "",
+            isStatus: true,
+            source: source || "origin",
+            updatedBy: userId
         });
 
         res.json({
@@ -168,41 +173,25 @@ exports.registerVisit = async (req, res) => {
     }
 };
 
-exports.addSearchHistory = async (req, res) => {
+exports.registerUpdateVisit = async (req, res) => {
     try {
+        const { leadId } = req.params;
         const userId = req.user.userId;
-        const { searchQuery, location, budgetMin, budgetMax } = req.body;
+        const { visitDate, visitTime, source } = req.body;
 
-        // Duplicate check
-        const existing = await UserSearchHistory.findOne({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
+        const updated = await leadModal.findByIdAndUpdate(
+            leadId,
+            { visitDate, visitTime, source, updatedBy: userId },
+            { new: true }
+        );
+
+        res.json({
+            success: true,
+            message: "Lead updated successfully",
+            data: updated
         });
-
-        if (existing) {
-            return res.json({
-                success: true,
-                message: 'Search already exists',
-                data: existing
-            });
-        }
-
-        // Add new search
-        const newSearch = await UserSearchHistory.create({
-            userId,
-            searchQuery,
-            location,
-            budgetMin,
-            budgetMax
-        });
-
-        res.json({ success: true, message: 'Search added successfully', data: newSearch });
-
     } catch (error) {
-        res.status(500).json({ success: false, message: error.message });
+        res.json({ success: false, message: error.message });
     }
 };
 
@@ -210,15 +199,44 @@ exports.getSearchHistory = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        const searches = await UserSearchHistory.find({ userId })
-            .sort({ createdAt: -1 });
+        const searches = await UserSearchHistory.find({ userId }).sort({ createdAt: -1 });
 
         const grouped = {};
-        searches.forEach(s => {
+        for (const s of searches) {
             const date = s.createdAt.toLocaleDateString();
+
+            const topProperties = await UserPropertyActivity.aggregate([
+                { $match: { activityType: "visited" } },
+                {
+                    $lookup: {
+                        from: "properties",
+                        localField: "propertyId",
+                        foreignField: "_id",
+                        as: "property"
+                    }
+                },
+                { $unwind: "$property" },
+                {
+                    $match: {
+                        ...(s.searchQuery ? { "property.projectName": { $regex: s.searchQuery, $options: "i" } } : {}),
+                        ...(s.location ? { "property.location": s.location } : {}),
+                        ...(s.developer ? { "property.developer": new mongoose.Types.ObjectId(s.developer) } : {})
+                    }
+                },
+                {
+                    $group: {
+                        _id: "$propertyId",
+                        visitCount: { $sum: 1 },
+                        lastVisitedAt: { $max: "$visitedAt" },
+                        property: { $first: "$property" }
+                    }
+                },
+                { $sort: { visitCount: -1, lastVisitedAt: -1 } }
+            ]);
+
             if (!grouped[date]) grouped[date] = [];
-            grouped[date].push(s);
-        });
+            grouped[date].push({ ...s._doc, topProperties });
+        }
 
         res.json({ success: true, message: 'Search history fetched', data: grouped });
     } catch (error) {
@@ -226,7 +244,6 @@ exports.getSearchHistory = async (req, res) => {
     }
 };
 
-// CREATE / UPDATE
 exports.saveContactPreferences = async (req, res) => {
     try {
         const userId = req.user._id;
@@ -430,29 +447,63 @@ exports.getVisitedProperties = async (req, res) => {
         const limit = parseInt(req.query.limit) || 10;
         const skip = (page - 1) * limit;
 
-        const total = await UserPropertyActivity.countDocuments({
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        // Upcoming visits (today or future)
+        const upcomingTotal = await UserPropertyActivity.countDocuments({
             userId,
-            activityType: "visited"
+            activityType: "visited",
+            visitDate: { $gte: today }
         });
 
-        const data = await UserPropertyActivity.find({
+        const upcoming = await UserPropertyActivity.find({
             userId,
-            activityType: "visited"
+            activityType: "visited",
+            visitDate: { $gte: today }
         })
             .populate("propertyId")
-            .sort({ visitedAt: -1 })
+            .sort({ visitDate: 1 })
+            .skip(skip)
+            .limit(limit);
+
+        // Completed visits (past)
+        const completedTotal = await UserPropertyActivity.countDocuments({
+            userId,
+            activityType: "visited",
+            visitDate: { $lt: today }
+        });
+
+        const completed = await UserPropertyActivity.find({
+            userId,
+            activityType: "visited",
+            visitDate: { $lt: today }
+        })
+            .populate("propertyId")
+            .sort({ visitDate: -1 })
             .skip(skip)
             .limit(limit);
 
         res.json({
             success: true,
             message: "Visited properties fetched",
-            data,
+            data: {
+                upcoming,
+                completed
+            },
             pagination: {
-                total,
-                page,
-                limit,
-                totalPages: Math.ceil(total / limit)
+                upcoming: {
+                    total: upcomingTotal,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(upcomingTotal / limit)
+                },
+                completed: {
+                    total: completedTotal,
+                    page,
+                    limit,
+                    totalPages: Math.ceil(completedTotal / limit)
+                }
             }
         });
 
@@ -460,4 +511,3 @@ exports.getVisitedProperties = async (req, res) => {
         res.json({ success: false, message: error.message });
     }
 };
-
