@@ -529,3 +529,152 @@ exports.compareProperties = async (req, res, next) => {
         next(error);
     }
 };
+
+// @desc    Calculate EMI (Equated Monthly Installment)
+// @route   POST /api/home/emi-calculator
+// @access  Public
+exports.calculateEMI = async (req, res, next) => {
+    try {
+        const { loanAmount, rateOfInterest, loanTenure, currency = 'INR' } = req.body;
+
+        // Validate inputs
+        if (!loanAmount || loanAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Loan amount must be greater than 0'
+            });
+        }
+
+        if (!rateOfInterest || rateOfInterest <= 0 || rateOfInterest > 100) {
+            return res.status(400).json({
+                success: false,
+                message: 'Rate of interest must be between 0 and 100'
+            });
+        }
+
+        if (!loanTenure || loanTenure <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Loan tenure must be greater than 0'
+            });
+        }
+
+        // Convert loan amount to actual number (handle Crores, Lakhs, etc.)
+        let principalAmount = parseFloat(loanAmount);
+
+        // If loan amount is in string format with units, parse it
+        if (typeof loanAmount === 'string') {
+            const amountStr = loanAmount.toLowerCase().trim();
+            if (amountStr.includes('crore') || amountStr.includes('cr')) {
+                const num = parseFloat(amountStr.replace(/[₹,\s]/g, '').replace(/crore|cr/gi, ''));
+                principalAmount = num * 10000000; // 1 Crore = 10,000,000
+            } else if (amountStr.includes('lakh') || amountStr.includes('l')) {
+                const num = parseFloat(amountStr.replace(/[₹,\s]/g, '').replace(/lakh|l/gi, ''));
+                principalAmount = num * 100000; // 1 Lakh = 100,000
+            } else {
+                principalAmount = parseFloat(amountStr.replace(/[₹,\s]/g, '')) || principalAmount;
+            }
+        }
+
+        // Convert annual interest rate to monthly rate
+        const monthlyRate = parseFloat(rateOfInterest) / 12 / 100;
+
+        // Loan tenure in months
+        const tenureMonths = parseInt(loanTenure);
+
+        // Calculate EMI using the formula: EMI = [P × R × (1+R)^N] / [(1+R)^N - 1]
+        // Where P = Principal, R = Monthly Rate, N = Tenure in months
+        const monthlyEMI = principalAmount * monthlyRate * Math.pow(1 + monthlyRate, tenureMonths) /
+            (Math.pow(1 + monthlyRate, tenureMonths) - 1);
+
+        // Calculate total amount payable
+        const totalAmountPayable = monthlyEMI * tenureMonths;
+
+        // Calculate total interest
+        const totalInterest = totalAmountPayable - principalAmount;
+
+        // Calculate principal and interest components for the first EMI (for pie chart)
+        const interestComponent = principalAmount * monthlyRate;
+        const principalComponent = monthlyEMI - interestComponent;
+
+        // Format amounts for display
+        const formatCurrency = (amount) => {
+            if (amount >= 10000000) {
+                return `₹ ${(amount / 10000000).toFixed(2)} Cr`;
+            } else if (amount >= 100000) {
+                return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
+            } else if (amount >= 1000) {
+                return `₹ ${(amount / 1000).toFixed(2)}k`;
+            } else {
+                return `₹ ${amount.toFixed(2)}`;
+            }
+        };
+
+        const formatCurrencySimple = (amount) => {
+            return `₹ ${amount.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
+        };
+
+        const result = {
+            monthlyEMI: {
+                value: Math.round(monthlyEMI),
+                formatted: formatCurrencySimple(Math.round(monthlyEMI))
+            },
+            principalAmount: {
+                value: principalAmount,
+                formatted: formatCurrencySimple(principalAmount),
+                display: formatCurrency(principalAmount)
+            },
+            totalInterest: {
+                value: Math.round(totalInterest),
+                formatted: formatCurrencySimple(Math.round(totalInterest))
+            },
+            totalAmountPayable: {
+                value: Math.round(totalAmountPayable),
+                formatted: formatCurrencySimple(Math.round(totalAmountPayable))
+            },
+            // For pie chart visualization
+            emiBreakdown: {
+                principal: Math.round(principalComponent),
+                interest: Math.round(interestComponent),
+                // Percentage for pie chart
+                principalPercentage: Math.round((principalComponent / monthlyEMI) * 100),
+                interestPercentage: Math.round((interestComponent / monthlyEMI) * 100)
+            },
+            // Input parameters (for reference)
+            input: {
+                loanAmount: principalAmount,
+                rateOfInterest: parseFloat(rateOfInterest),
+                loanTenure: tenureMonths,
+                currency: currency
+            },
+            // Additional calculations
+            totalPrincipalPaid: {
+                value: principalAmount,
+                formatted: formatCurrencySimple(principalAmount)
+            },
+            // Disclaimer
+            disclaimer: "Calculated EMI result is indicative only."
+        };
+
+        logInfo('EMI calculated', {
+            loanAmount: principalAmount,
+            rateOfInterest: rateOfInterest,
+            loanTenure: tenureMonths,
+            monthlyEMI: Math.round(monthlyEMI)
+        });
+
+        res.json({
+            success: true,
+            message: 'EMI calculated successfully',
+            data: result
+        });
+
+    } catch (error) {
+        logError('Error calculating EMI', error, {
+            loanAmount: req.body.loanAmount,
+            rateOfInterest: req.body.rateOfInterest,
+            loanTenure: req.body.loanTenure
+        });
+        next(error);
+    }
+};

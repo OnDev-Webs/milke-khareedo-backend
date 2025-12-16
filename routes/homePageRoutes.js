@@ -18,4 +18,7 @@ router.post('/search', optionalAuthenticate, homePageController.addSearchHistory
 // Property Comparison
 router.post('/compare', homePageController.compareProperties);
 
+// EMI Calculator
+router.post('/emi-calculator', homePageController.calculateEMI);
+
 module.exports = router;
