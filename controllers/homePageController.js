@@ -3,6 +3,7 @@ const Property = require('../models/property');
 const UserPropertyActivity = require('../models/userPropertyActivity');
 const UserSearchHistory = require('../models/userSearchHistory');
 const mongoose = require('mongoose');
+const { logInfo, logError } = require('../utils/logger');
 
 exports.getTopVisitedProperties = async (req, res, next) => {
     try {
@@ -60,6 +61,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         const data = result[0].data;
         const total = result[0].totalCount[0]?.count || 0;
 
+        logInfo('Top visited properties fetched', { total, page, limit, filters: { developer, projectName, possessionStatus, location, unitType } });
         res.json({
             success: true,
             type: "TOP_VISITED",
@@ -73,6 +75,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         });
 
     } catch (error) {
+        logError('Error fetching top visited properties', error);
         next(error);
     }
 };
@@ -87,22 +90,26 @@ exports.getTopPropertyById = async (req, res, next) => {
             return res.status(400).json({ success: false, message: "Invalid property ID" });
         }
 
-        // Find property by ID
+        // Find property by ID - optimize with lean() and select specific fields
         const property = await Property.findById(id)
             .populate('developer', 'name')
             .populate('relationshipManager', 'name')
-            .populate('leadDistributionAgents', 'name');
+            .populate('leadDistributionAgents', 'name')
+            .lean();
 
         if (!property) {
+            logInfo('Property not found', { propertyId: id });
             return res.status(404).json({ success: false, message: "Property not found" });
         }
 
+        logInfo('Property fetched by ID', { propertyId: id });
         res.json({
             success: true,
             data: property
         });
 
     } catch (error) {
+        logError('Error fetching property by ID', error, { propertyId: id });
         next(error);
     }
 };
@@ -116,11 +123,13 @@ exports.addViewedProperty = async (req, res) => {
             userId,
             propertyId,
             activityType: "viewed"
-        });
+        }).lean();
 
         if (existing) {
-            existing.lastViewedAt = new Date();
-            await existing.save();
+            await UserPropertyActivity.updateOne(
+                { _id: existing._id },
+                { lastViewedAt: new Date() }
+            );
         } else {
             await UserPropertyActivity.create({
                 userId,
@@ -130,9 +139,11 @@ exports.addViewedProperty = async (req, res) => {
             });
         }
 
+        logInfo('Property view added', { userId, propertyId });
         res.json({ success: true, message: "View added successfully" });
 
     } catch (error) {
+        logError('Error adding property view', error, { userId, propertyId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -146,10 +157,11 @@ exports.toggleFavoriteProperty = async (req, res) => {
             userId,
             propertyId,
             activityType: "favorite"
-        });
+        }).lean();
 
         if (existing) {
-            await existing.deleteOne();
+            await UserPropertyActivity.deleteOne({ _id: existing._id });
+            logInfo('Property removed from favorites', { userId, propertyId });
             return res.json({
                 success: true,
                 message: "Removed from favorites"
@@ -163,9 +175,11 @@ exports.toggleFavoriteProperty = async (req, res) => {
             favoritedAt: new Date()
         });
 
+        logInfo('Property added to favorites', { userId, propertyId });
         res.json({ success: true, message: "Added to favorites" });
 
     } catch (error) {
+        logError('Error toggling favorite property', error, { userId, propertyId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -175,9 +189,13 @@ exports.registerVisit = async (req, res) => {
         const userId = req.user.userId;
         const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
 
-        // Validate property
-        const property = await Property.findById(propertyId).populate('relationshipManager');
+        // Validate property - optimize with lean() and select only needed fields
+        const property = await Property.findById(propertyId)
+            .populate('relationshipManager', 'email phone')
+            .select('relationshipManager')
+            .lean();
         if (!property) {
+            logInfo('Property not found for visit registration', { propertyId });
             return res.status(404).json({ success: false, message: "Property not found" });
         }
 
@@ -187,20 +205,28 @@ exports.registerVisit = async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid visitDate format" });
         }
 
-        // Create or update visit activity
+        // Create or update visit activity - optimize with updateOne
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
             activityType: "visited"
-        });
+        }).lean();
 
         if (existingActivity) {
-            existingActivity.visitedAt = new Date();
-            if (parsedVisitDate) existingActivity.visitDate = parsedVisitDate;
-            existingActivity.visitTime = visitTime;
-            existingActivity.source = source || "origin";
-            existingActivity.updatedBy = userId;
-            await existingActivity.save();
+            const updateData = {
+                visitedAt: new Date(),
+                visitTime,
+                source: source || "origin",
+                updatedBy: userId
+            };
+            // Only update visitDate if provided to prevent overwriting existing values
+            if (parsedVisitDate) {
+                updateData.visitDate = parsedVisitDate;
+            }
+            await UserPropertyActivity.updateOne(
+                { _id: existingActivity._id },
+                updateData
+            );
         } else {
             await UserPropertyActivity.create({
                 userId,
@@ -227,20 +253,21 @@ exports.registerVisit = async (req, res) => {
             updatedBy: userId
         });
 
+        logInfo('Visit registered and lead created', { userId, propertyId, source });
         res.json({
             success: true,
             message: "Visit registered & lead created successfully"
         });
 
     } catch (error) {
-        console.error(error);
+        logError('Error registering visit', error, { userId, propertyId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
 
 exports.addSearchHistory = async (req, res, next) => {
     try {
-        const userId = req.user?.userId; 
+        const userId = req.user?.userId;
         const { searchQuery, location, developer, projectName } = req.body;
 
         const trimmedSearchQuery = searchQuery?.trim();
@@ -304,14 +331,20 @@ exports.addSearchHistory = async (req, res, next) => {
             { $sort: { visitCount: -1, lastVisitedAt: -1 } }
         ]);
 
+        logInfo('Search history added', {
+            userId,
+            hasSearchData: !!searchData,
+            topPropertiesCount: topProperties.length
+        });
         res.json({
             success: true,
             message: userId ? "Search added successfully" : "Search executed successfully",
-            searchData, 
+            searchData,
             topProperties
         });
 
     } catch (error) {
+        logError('Error adding search history', error, { userId });
         next(error);
     }
 };

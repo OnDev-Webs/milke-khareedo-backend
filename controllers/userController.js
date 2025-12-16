@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const jwtConfig = require('../config/jwt');
 const { OAuth2Client } = require('google-auth-library');
 const { uploadToS3 } = require('../utils/s3');
+const { logInfo, logError } = require('../utils/logger');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // @desc    Register a new user
@@ -14,9 +15,10 @@ exports.register = async (req, res, next) => {
     try {
         const { name, email, password, phone } = req.body;
 
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
+        // Check if user already exists - optimize with lean() and select only email
+        const existingUser = await User.findOne({ email }).select('email').lean();
         if (existingUser) {
+            logInfo('Registration attempt with existing email', { email });
             return res.status(400).json({
                 success: false,
                 message: 'User already exists with this email'
@@ -35,8 +37,8 @@ exports.register = async (req, res, next) => {
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // Get default role or create one if needed
-        let defaultRole = await Role.findOne({ name: 'User' });
+        // Get default role or create one if needed - optimize with lean()
+        let defaultRole = await Role.findOne({ name: 'User' }).lean();
         if (!defaultRole) {
             defaultRole = await Role.create({
                 name: 'User',
@@ -47,6 +49,7 @@ exports.register = async (req, res, next) => {
                     team: { add: false, edit: false, view: false, delete: false }
                 }
             });
+            logInfo('Default User role created');
         }
 
         // Create user
@@ -58,8 +61,8 @@ exports.register = async (req, res, next) => {
             role: defaultRole._id
         });
 
-        // Populate role
-        await user.populate('role');
+        // Populate role - use select to get only needed fields
+        await user.populate('role', 'name permissions');
 
         // Generate JWT token
         const token = jwt.sign(
@@ -68,6 +71,7 @@ exports.register = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
+        logInfo('User registered successfully', { userId: user._id, email: user.email });
         res.status(201).json({
             success: true,
             message: 'User registered successfully',
@@ -87,6 +91,7 @@ exports.register = async (req, res, next) => {
             }
         });
     } catch (error) {
+        logError('Error during user registration', error);
         next(error);
     }
 };
@@ -98,9 +103,10 @@ exports.login = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user exists
-        const user = await User.findOne({ email }).select('+password');
+        // Check if user exists - optimize query
+        const user = await User.findOne({ email }).select('+password').populate('role', 'name permissions');
         if (!user) {
+            logInfo('Login attempt with invalid email', { email });
             return res.status(401).json({
                 success: false,
                 message: 'Invalid credentials'
@@ -110,14 +116,12 @@ exports.login = async (req, res, next) => {
         // Check password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
+            logInfo('Login attempt with invalid password', { email });
             return res.status(401).json({
                 success: false,
                 message: 'Invalid credentials'
             });
         }
-
-        // Populate role
-        await user.populate('role');
 
         const roleId = user.role?._id;  // optional chaining
         const roleName = user.role?.name || 'user';
@@ -129,6 +133,7 @@ exports.login = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
+        logInfo('User logged in successfully', { userId: user._id, email: user.email });
         res.json({
             success: true,
             message: 'Login successful',
@@ -148,6 +153,7 @@ exports.login = async (req, res, next) => {
         });
 
     } catch (error) {
+        logError('Error during user login', error);
         next(error);
     }
 };
@@ -165,11 +171,11 @@ exports.googleLogin = async (req, res, next) => {
         const payload = ticket.getPayload();
         const { email, name } = payload;
 
-        // Check if user exists
-        let user = await User.findOne({ email });
+        // Check if user exists - optimize query
+        let user = await User.findOne({ email }).populate('role', 'name permissions');
         if (!user) {
-            // Get default role or create one if needed
-            let defaultRole = await Role.findOne({ name: 'User' });
+            // Get default role or create one if needed - optimize with lean()
+            let defaultRole = await Role.findOne({ name: 'User' }).lean();
             if (!defaultRole) {
                 defaultRole = await Role.create({
                     name: 'User',
@@ -180,6 +186,7 @@ exports.googleLogin = async (req, res, next) => {
                         team: { add: false, edit: false, view: false, delete: false }
                     }
                 });
+                logInfo('Default User role created during Google login');
             }
 
             // Create new user
@@ -189,10 +196,9 @@ exports.googleLogin = async (req, res, next) => {
                 password: '',
                 role: defaultRole._id
             });
+            await user.populate('role', 'name permissions');
+            logInfo('New user created via Google login', { userId: user._id, email });
         }
-
-        // Populate role
-        await user.populate('role');
 
         // Generate JWT token
         const token = jwt.sign(
@@ -201,6 +207,7 @@ exports.googleLogin = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
+        logInfo('User logged in via Google', { userId: user._id, email: user.email });
         res.json({
             success: true,
             message: 'Login successful',
@@ -219,6 +226,7 @@ exports.googleLogin = async (req, res, next) => {
             }
         });
     } catch (error) {
+        logError('Error during Google login', error);
         next(error);
     }
 };
@@ -227,14 +235,20 @@ exports.googleLogin = async (req, res, next) => {
 // @access  Private
 exports.getProfile = async (req, res, next) => {
     try {
-        const user = await User.findById(req.user.userId).populate('role');
+        // Optimize query - select only needed fields and use lean()
+        const user = await User.findById(req.user.userId)
+            .select('-password')
+            .populate('role', 'name permissions')
+            .lean();
         if (!user) {
+            logInfo('Profile not found', { userId: req.user.userId });
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
             });
         }
 
+        logInfo('Profile fetched', { userId: req.user.userId });
         res.json({
             success: true,
             data: {
@@ -252,6 +266,7 @@ exports.getProfile = async (req, res, next) => {
             }
         });
     } catch (error) {
+        logError('Error fetching profile', error, { userId: req.user.userId });
         next(error);
     }
 };
@@ -274,8 +289,12 @@ exports.updateUser = async (req, res, next) => {
         if (email) updates.email = email;
         if (profileImage) updates.profileImage = profileImage;
 
-        const updatedUser = await User.findByIdAndUpdate(userId, updates, { new: true, runValidators: true }).select('-password');
+        const updatedUser = await User.findByIdAndUpdate(userId, updates, {
+            new: true,
+            runValidators: true
+        }).select('-password').lean();
 
+        logInfo('Profile updated', { userId });
         res.status(200).json({
             success: true,
             message: "Profile updated successfully",
@@ -283,7 +302,7 @@ exports.updateUser = async (req, res, next) => {
         });
 
     } catch (error) {
-        console.error(error);
+        logError('Error updating profile', error, { userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -295,17 +314,20 @@ exports.deleteUser = async (req, res, next) => {
     try {
         const user = await User.findByIdAndDelete(req.params.id);
         if (!user) {
+            logInfo('User not found for deletion', { userId: req.params.id });
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
             });
         }
 
+        logInfo('User deleted', { userId: req.params.id });
         res.json({
             success: true,
             message: 'User deleted successfully'
         });
     } catch (error) {
+        logError('Error deleting user', error, { userId: req.params.id });
         next(error);
     }
 };
