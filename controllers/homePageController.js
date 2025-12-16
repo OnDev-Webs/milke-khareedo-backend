@@ -348,3 +348,184 @@ exports.addSearchHistory = async (req, res, next) => {
         next(error);
     }
 };
+
+// @desc    Compare multiple properties
+// @route   POST /api/home/compare
+// @access  Public (or Private if needed)
+exports.compareProperties = async (req, res, next) => {
+    try {
+        const { propertyIds } = req.body;
+
+        // Validate input
+        if (!propertyIds || !Array.isArray(propertyIds)) {
+            return res.status(400).json({
+                success: false,
+                message: 'propertyIds must be an array'
+            });
+        }
+
+        // Limit to 3 properties for comparison (as per UI)
+        if (propertyIds.length === 0 || propertyIds.length > 3) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please provide 1 to 3 property IDs for comparison'
+            });
+        }
+
+        // Validate all IDs are valid ObjectIds
+        const invalidIds = propertyIds.filter(id => !mongoose.Types.ObjectId.isValid(id));
+        if (invalidIds.length > 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Invalid property IDs: ${invalidIds.join(', ')}`
+            });
+        }
+
+        // Fetch all properties in parallel with optimized queries
+        const properties = await Property.find({
+            _id: { $in: propertyIds },
+            isStatus: true
+        })
+            .populate('developer', 'developerName')
+            .populate('relationshipManager', 'name email phone')
+            .select('projectName developer location configurations images layouts possessionDate possessionStatus projectId developerPrice groupPrice')
+            .lean();
+
+        // Check if all properties were found
+        if (properties.length !== propertyIds.length) {
+            const foundIds = properties.map(p => p._id.toString());
+            const missingIds = propertyIds.filter(id => !foundIds.includes(id));
+            return res.status(404).json({
+                success: false,
+                message: `Properties not found: ${missingIds.join(', ')}`
+            });
+        }
+
+        // Format properties for comparison
+        const formattedProperties = properties.map(property => {
+            // Calculate budget range from configurations
+            const prices = property.configurations
+                .map(config => {
+                    const priceStr = config.price || '0';
+                    // Remove currency symbols, spaces, and convert to number
+                    // Handle both lakhs and crores format
+                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
+
+                    // If price is in lakhs (less than 1000000), convert to rupees
+                    if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
+                        priceNum = priceNum * 100000;
+                    }
+                    // If price is in crores (contains 'cr' or 'crore'), convert to rupees
+                    else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
+                        priceNum = priceNum * 10000000;
+                    }
+
+                    return priceNum;
+                })
+                .filter(price => price > 0);
+
+            // Also check root level developerPrice and groupPrice
+            if (property.developerPrice) {
+                let devPrice = parseFloat(property.developerPrice.replace(/[₹,\s]/g, '')) || 0;
+                if (property.developerPrice.toLowerCase().includes('lakh') || property.developerPrice.toLowerCase().includes('l')) {
+                    devPrice = devPrice * 100000;
+                } else if (property.developerPrice.toLowerCase().includes('cr') || property.developerPrice.toLowerCase().includes('crore')) {
+                    devPrice = devPrice * 10000000;
+                }
+                if (devPrice > 0) prices.push(devPrice);
+            }
+
+            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+
+            // Calculate area range from configurations
+            const areas = property.configurations
+                .map(config => {
+                    const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                    const builtUpArea = parseFloat(config.builtUpArea?.replace(/[sqft,\s]/gi, '') || '0');
+                    return Math.max(carpetArea, builtUpArea);
+                })
+                .filter(area => area > 0);
+
+            const minArea = areas.length > 0 ? Math.min(...areas) : 0;
+            const maxArea = areas.length > 0 ? Math.max(...areas) : 0;
+
+            // Get unique BHK types from configurations
+            const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
+
+            // Get cover image or first image
+            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+
+            // Get floor plan images (layouts)
+            const floorPlans = property.layouts?.map(layout => ({
+                image: layout.image,
+                unitType: layout.configurationUnitType
+            })) || [];
+
+            // Format possession date
+            let possessionDateFormatted = null;
+            if (property.possessionDate) {
+                const date = new Date(property.possessionDate);
+                possessionDateFormatted = date.toLocaleDateString('en-IN', {
+                    month: 'short',
+                    year: 'numeric'
+                });
+            }
+
+            return {
+                id: property._id,
+                projectId: property.projectId,
+                projectName: property.projectName,
+                developer: property.developer?.developerName || 'N/A',
+                developerId: property.developer?._id || null,
+                location: property.location,
+                propertyType: 'Residential', // Based on UI, can be made dynamic if needed
+                budget: {
+                    min: minPrice,
+                    max: maxPrice,
+                    formatted: minPrice > 0 && maxPrice > 0
+                        ? `₹ ${(minPrice / 10000000).toFixed(2)} Cr - ${(maxPrice / 10000000).toFixed(2)} Cr`
+                        : 'Price on Request'
+                },
+                area: {
+                    min: minArea,
+                    max: maxArea,
+                    formatted: minArea > 0 && maxArea > 0
+                        ? `${minArea} - ${maxArea} sqft`
+                        : 'Area on Request'
+                },
+                configurations: unitTypes,
+                configurationsFormatted: unitTypes.join(', '),
+                mainImage: coverImage,
+                floorPlans: floorPlans,
+                possessionDate: property.possessionDate,
+                possessionDateFormatted: possessionDateFormatted,
+                possessionStatus: property.possessionStatus || 'N/A',
+                relationshipManager: property.relationshipManager ? {
+                    id: property.relationshipManager._id,
+                    name: property.relationshipManager.name,
+                    email: property.relationshipManager.email,
+                    phone: property.relationshipManager.phone
+                } : null,
+                // Include full configurations for detailed view if needed
+                fullConfigurations: property.configurations
+            };
+        });
+
+        logInfo('Properties compared', {
+            propertyCount: formattedProperties.length,
+            propertyIds: propertyIds
+        });
+
+        res.json({
+            success: true,
+            message: 'Properties fetched for comparison',
+            data: formattedProperties,
+            count: formattedProperties.length
+        });
+
+    } catch (error) {
+        logError('Error comparing properties', error, { propertyIds: req.body.propertyIds });
+        next(error);
+    }
+};
