@@ -2,9 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const helmet = require('helmet');
+const compression = require('compression');
 require('dotenv').config();
 
 const connectDB = require('./config/database');
+const { logInfo, logError } = require('./utils/logger');
+const apiLogger = require('./middleware/logger');
 
 // Connect to database
 connectDB();
@@ -18,9 +21,11 @@ const errorHandler = require('./middleware/errorHandler');
 // Middleware
 app.use(helmet()); // Security headers
 app.use(cors()); // Enable CORS
-app.use(morgan('dev')); // Logging
-app.use(express.json()); // Parse JSON bodies
-app.use(express.urlencoded({ extended: true })); // Parse URL-encoded bodies
+app.use(compression()); // Compress responses for faster transfer
+app.use(morgan('dev')); // HTTP request logger
+app.use(express.json({ limit: '10mb' })); // Parse JSON bodies
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Parse URL-encoded bodies
+app.use(apiLogger); // API request/response logger
 
 // Health check route
 app.get('/', (req, res) => {
@@ -48,6 +53,10 @@ app.use(errorHandler);
 // Start server
 const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
+    logInfo(`Server is running on port ${PORT}`, {
+        environment: process.env.NODE_ENV || 'development',
+        port: PORT
+    });
     console.log(`Server is running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 });

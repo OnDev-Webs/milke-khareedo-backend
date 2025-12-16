@@ -1,9 +1,8 @@
+const { logError } = require('../utils/logger');
+
 const errorHandler = (err, req, res, next) => {
     let error = { ...err };
     error.message = err.message;
-
-    // Log error
-    console.error(err);
 
     // Mongoose bad ObjectId
     if (err.name === 'CastError') {
@@ -22,6 +21,20 @@ const errorHandler = (err, req, res, next) => {
         const message = Object.values(err.errors).map(val => val.message).join(', ');
         error = { message, statusCode: 400 };
     }
+
+    // Log error to BetterStack
+    logError('API Error', err, {
+        method: req.method,
+        url: req.originalUrl || req.url,
+        statusCode: error.statusCode || 500,
+        ip: req.ip || req.connection.remoteAddress,
+        userId: req.user?.userId || null,
+        body: req.method !== 'GET' ? req.body : undefined,
+        query: req.query
+    });
+
+    // Also log to console for local development
+    console.error('Error:', err);
 
     res.status(error.statusCode || 500).json({
         success: false,

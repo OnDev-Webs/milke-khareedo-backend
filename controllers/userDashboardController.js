@@ -3,26 +3,20 @@ const Property = require('../models/property');
 const UserPropertyActivity = require('../models/userPropertyActivity');
 const UserSearchHistory = require('../models/userSearchHistory');
 const ContactPreferences = require('../models/userContactDetails');
+const { logInfo, logError } = require('../utils/logger');
 
 exports.getUserDashboard = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        const totalViewed = await UserPropertyActivity.countDocuments({
-            userId,
-            activityType: "viewed"
-        });
+        // Optimize: Run all count queries in parallel
+        const [totalViewed, totalFavorited, totalVisited] = await Promise.all([
+            UserPropertyActivity.countDocuments({ userId, activityType: "viewed" }),
+            UserPropertyActivity.countDocuments({ userId, activityType: "favorite" }),
+            UserPropertyActivity.countDocuments({ userId, activityType: "visited" })
+        ]);
 
-        const totalFavorited = await UserPropertyActivity.countDocuments({
-            userId,
-            activityType: "favorite"
-        });
-
-        const totalVisited = await UserPropertyActivity.countDocuments({
-            userId,
-            activityType: "visited"
-        });
-
+        logInfo('User dashboard data fetched', { userId, totalViewed, totalFavorited, totalVisited });
         res.status(200).json({
             success: true,
             message: "Dashboard data fetched",
@@ -34,6 +28,7 @@ exports.getUserDashboard = async (req, res) => {
         });
 
     } catch (error) {
+        logError('Error fetching user dashboard', error, { userId: req.user.userId });
         res.status(500).json({
             success: false,
             message: "Error fetching dashboard",
@@ -51,11 +46,13 @@ exports.addViewedProperty = async (req, res) => {
             userId,
             propertyId,
             activityType: "viewed"
-        });
+        }).lean();
 
         if (existing) {
-            existing.lastViewedAt = new Date();
-            await existing.save();
+            await UserPropertyActivity.updateOne(
+                { _id: existing._id },
+                { lastViewedAt: new Date() }
+            );
         } else {
             await UserPropertyActivity.create({
                 userId,
@@ -65,9 +62,11 @@ exports.addViewedProperty = async (req, res) => {
             });
         }
 
+        logInfo('Property view added in dashboard', { userId, propertyId });
         res.json({ success: true, message: "View added successfully" });
 
     } catch (error) {
+        logError('Error adding property view in dashboard', error, { userId, propertyId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -81,10 +80,11 @@ exports.toggleFavoriteProperty = async (req, res) => {
             userId,
             propertyId,
             activityType: "favorite"
-        });
+        }).lean();
 
         if (existing) {
-            await existing.deleteOne();
+            await UserPropertyActivity.deleteOne({ _id: existing._id });
+            logInfo('Property removed from favorites in dashboard', { userId, propertyId });
             return res.json({
                 success: true,
                 message: "Removed from favorites"
@@ -98,9 +98,11 @@ exports.toggleFavoriteProperty = async (req, res) => {
             favoritedAt: new Date()
         });
 
+        logInfo('Property added to favorites in dashboard', { userId, propertyId });
         res.json({ success: true, message: "Added to favorites" });
 
     } catch (error) {
+        logError('Error toggling favorite property in dashboard', error, { userId, propertyId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -108,7 +110,7 @@ exports.toggleFavoriteProperty = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime ,source = "origin" } = req.body;
+        const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
 
         // Validate property
         const property = await Property.findById(propertyId).populate('relationshipManager');
@@ -122,20 +124,28 @@ exports.registerVisit = async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid visitDate format" });
         }
 
-        // Create or update visit activity
+        // Create or update visit activity - optimize with updateOne
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
             activityType: "visited"
-        });
+        }).lean();
 
         if (existingActivity) {
-            existingActivity.visitedAt = new Date();
-            if (parsedVisitDate) existingActivity.visitDate = parsedVisitDate;
-            existingActivity.visitTime = visitTime;
-            existingActivity.source = source || "origin";
-            existingActivity.updatedBy = userId;
-            await existingActivity.save();
+            const updateData = {
+                visitedAt: new Date(),
+                visitTime,
+                source: source || "origin",
+                updatedBy: userId
+            };
+            // Only update visitDate if provided to prevent overwriting existing values
+            if (parsedVisitDate) {
+                updateData.visitDate = parsedVisitDate;
+            }
+            await UserPropertyActivity.updateOne(
+                { _id: existingActivity._id },
+                updateData
+            );
         } else {
             await UserPropertyActivity.create({
                 userId,
@@ -199,7 +209,11 @@ exports.getSearchHistory = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        const searches = await UserSearchHistory.find({ userId }).sort({ createdAt: -1 });
+        // Optimize query with lean() and limit results
+        const searches = await UserSearchHistory.find({ userId })
+            .sort({ createdAt: -1 })
+            .lean()
+            .limit(100); // Limit to last 100 searches for performance
 
         const grouped = {};
         for (const s of searches) {
@@ -238,8 +252,10 @@ exports.getSearchHistory = async (req, res) => {
             grouped[date].push({ ...s._doc, topProperties });
         }
 
+        logInfo('Search history fetched', { userId, searchCount: searches.length });
         res.json({ success: true, message: 'Search history fetched', data: grouped });
     } catch (error) {
+        logError('Error fetching search history', error, { userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -345,15 +361,16 @@ exports.getContactPreferences = async (req, res) => {
     try {
         const userId = req.user._id;
 
-        const result = await ContactPreferences.findOne({ userId });
+        const result = await ContactPreferences.findOne({ userId }).lean();
 
+        logInfo('Contact preferences fetched', { userId });
         return res.status(200).json({
             success: true,
             data: result
         });
 
     } catch (error) {
-        console.error(error);
+        logError('Error fetching contact preferences', error, { userId });
         return res.status(500).json({
             success: false,
             message: error.message
@@ -383,6 +400,7 @@ exports.getViewedProperties = async (req, res) => {
             .skip(skip)
             .limit(limit);
 
+        logInfo('Viewed properties fetched', { userId, total, page, limit });
         res.json({
             success: true,
             message: "Viewed properties fetched",
@@ -396,6 +414,7 @@ exports.getViewedProperties = async (req, res) => {
         });
 
     } catch (error) {
+        logError('Error fetching viewed properties', error, { userId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -413,15 +432,19 @@ exports.getFavoritedProperties = async (req, res) => {
             activityType: "favorite"
         });
 
+        // Optimize query with lean() and select only needed fields
         const data = await UserPropertyActivity.find({
             userId,
             activityType: "favorite"
         })
-            .populate("propertyId")
+            .populate("propertyId", 'projectName location developer')
+            .select('propertyId favoritedAt')
             .sort({ favoritedAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limit)
+            .lean();
 
+        logInfo('Favorited properties fetched', { userId, total, page, limit });
         res.json({
             success: true,
             message: "Favorited properties fetched",
@@ -435,6 +458,7 @@ exports.getFavoritedProperties = async (req, res) => {
         });
 
     } catch (error) {
+        logError('Error fetching favorited properties', error, { userId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -457,33 +481,38 @@ exports.getVisitedProperties = async (req, res) => {
             visitDate: { $gte: today }
         });
 
-        const upcoming = await UserPropertyActivity.find({
-            userId,
-            activityType: "visited",
-            visitDate: { $gte: today }
-        })
-            .populate("propertyId")
-            .sort({ visitDate: 1 })
-            .skip(skip)
-            .limit(limit);
+        // Optimize: Run queries in parallel and use lean()
+        const [upcoming, completedTotal, completed] = await Promise.all([
+            UserPropertyActivity.find({
+                userId,
+                activityType: "visited",
+                visitDate: { $gte: today }
+            })
+                .populate("propertyId", 'projectName location developer')
+                .select('propertyId visitDate visitTime')
+                .sort({ visitDate: 1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            UserPropertyActivity.countDocuments({
+                userId,
+                activityType: "visited",
+                visitDate: { $lt: today }
+            }),
+            UserPropertyActivity.find({
+                userId,
+                activityType: "visited",
+                visitDate: { $lt: today }
+            })
+                .populate("propertyId", 'projectName location developer')
+                .select('propertyId visitDate visitTime')
+                .sort({ visitDate: -1 })
+                .skip(skip)
+                .limit(limit)
+                .lean()
+        ]);
 
-        // Completed visits (past)
-        const completedTotal = await UserPropertyActivity.countDocuments({
-            userId,
-            activityType: "visited",
-            visitDate: { $lt: today }
-        });
-
-        const completed = await UserPropertyActivity.find({
-            userId,
-            activityType: "visited",
-            visitDate: { $lt: today }
-        })
-            .populate("propertyId")
-            .sort({ visitDate: -1 })
-            .skip(skip)
-            .limit(limit);
-
+        logInfo('Visited properties fetched', { userId, upcomingTotal, completedTotal, page, limit });
         res.json({
             success: true,
             message: "Visited properties fetched",
@@ -508,6 +537,7 @@ exports.getVisitedProperties = async (req, res) => {
         });
 
     } catch (error) {
+        logError('Error fetching visited properties', error, { userId });
         res.json({ success: false, message: error.message });
     }
 };

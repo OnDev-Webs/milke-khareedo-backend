@@ -7,6 +7,7 @@ const Developer = require('../models/developer');
 const Property = require('../models/property');
 const leadModal = require("../models/leadModal");
 const { uploadToS3 } = require("../utils/s3");
+const { logInfo, logError } = require('../utils/logger');
 
 // AUTH SECTION
 
@@ -18,9 +19,10 @@ exports.registerSuperAdmin = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user already exists
-        const existingUser = await User.findOne({ email });
+        // Check if user already exists - optimize with lean()
+        const existingUser = await User.findOne({ email }).select('email').lean();
         if (existingUser) {
+            logInfo('Super admin registration attempt with existing email', { email });
             return res.status(400).json({
                 success: false,
                 message: 'User already exists with this email'
@@ -77,6 +79,7 @@ exports.registerSuperAdmin = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
+        logInfo('Super admin registered successfully', { userId: user._id, email: user.email });
         res.status(201).json({
             success: true,
             message: 'Superadmin registered successfully',
@@ -95,6 +98,7 @@ exports.registerSuperAdmin = async (req, res, next) => {
             }
         });
     } catch (error) {
+        logError('Error registering super admin', error);
         next(error);
     }
 };
@@ -106,10 +110,11 @@ exports.adminLogin = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user exists
-        const user = await User.findOne({ email }).select('+password').populate('role');
+        // Check if user exists - optimize query
+        const user = await User.findOne({ email }).select('+password').populate('role', 'name permissions');
 
         if (!user) {
+            logInfo('Admin login attempt with invalid email', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
@@ -120,6 +125,7 @@ exports.adminLogin = async (req, res, next) => {
         const allowedRoles = ["admin", "Super Admin", "Project Manager", "CRM Manager"];
 
         if (!allowedRoles.includes(user.role.name)) {
+            logInfo('Admin login attempt with unauthorized role', { email, role: user.role.name });
             return res.status(403).json({
                 success: false,
                 message: "You are not allowed to access admin panel"
@@ -129,6 +135,7 @@ exports.adminLogin = async (req, res, next) => {
         // Check password
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
+            logInfo('Admin login attempt with invalid password', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
@@ -142,6 +149,7 @@ exports.adminLogin = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
+        logInfo('Admin logged in successfully', { userId: user._id, email: user.email, role: user.role.name });
         return res.json({
             success: true,
             message: "Admin login successful",
@@ -161,6 +169,7 @@ exports.adminLogin = async (req, res, next) => {
         });
 
     } catch (error) {
+        logError('Error during admin login', error);
         next(error);
     }
 };
@@ -303,8 +312,9 @@ exports.createProperty = async (req, res, next) => {
         } = req.body;
 
         // ---------- Developer Validation ----------
-        const dev = await Developer.findById(developer);
+        const dev = await Developer.findById(developer).lean();
         if (!dev) {
+            logInfo('Property creation failed - invalid developer', { developer });
             return res.status(400).json({
                 success: false,
                 message: "Invalid developer selected"
@@ -312,8 +322,8 @@ exports.createProperty = async (req, res, next) => {
         }
 
         // ---------- RM Validation (Role = project_manager) ----------
-        // Fetch Role ObjectId
-        const projectManagerRole = await Role.findOne({ name: "Project Manager" });
+        // Fetch Role ObjectId - optimize with lean()
+        const projectManagerRole = await Role.findOne({ name: "Project Manager" }).lean();
 
         if (!projectManagerRole) {
             return res.status(400).json({ success: false, message: "Role 'project_manager' not found" });
@@ -323,8 +333,9 @@ exports.createProperty = async (req, res, next) => {
             const rm = await User.findOne({
                 _id: relationshipManager,
                 role: projectManagerRole._id
-            });
+            }).select('_id name').lean();
             if (!rm) {
+                logInfo('Property creation failed - invalid RM', { relationshipManager });
                 return res.status(400).json({
                     success: false,
                     message: "Invalid Relationship Manager (must have role 'project_manager')"
@@ -333,7 +344,7 @@ exports.createProperty = async (req, res, next) => {
         }
 
         // ---------- Agents Validation (Role = agent) ----------
-        const agentRole = await Role.findOne({ name: "Agent" });
+        const agentRole = await Role.findOne({ name: "Agent" }).lean();
 
         if (!agentRole) {
             return res.status(400).json({ success: false, message: "Role 'agent' not found" });
@@ -430,11 +441,19 @@ exports.createProperty = async (req, res, next) => {
         });
 
         // ---------- Extra Return Data ----------
-        const developers = await Developer.find().select("_id name");
-        const relationshipManagers = await User.find({ role: projectManagerRole._id }).select("_id name email");
-        const agents = await User.find({ role: agentRole._id }).select("_id name email");
+        // Optimize queries with lean() and run in parallel
+        const [developers, relationshipManagers, agents] = await Promise.all([
+            Developer.find().select("_id name").lean(),
+            User.find({ role: projectManagerRole._id }).select("_id name email").lean(),
+            User.find({ role: agentRole._id }).select("_id name email").lean()
+        ]);
 
         // ---------- Response ----------
+        logInfo('Property created successfully', {
+            propertyId: property._id,
+            projectName: property.projectName,
+            developer: property.developer
+        });
         res.status(201).json({
             success: true,
             message: "Property created successfully",
@@ -449,7 +468,7 @@ exports.createProperty = async (req, res, next) => {
         });
 
     } catch (error) {
-        console.log(error);
+        logError('Error creating property', error, { projectName, developer, location });
         next(error);
     }
 };
@@ -677,7 +696,11 @@ exports.updateProperty = async (req, res, next) => {
         });
 
     } catch (error) {
-        console.log(error);
+        logError('Error updating property', error, {
+            propertyId: req.params.id,
+            projectName: updates.projectName || req.body.projectName,
+            developer: updates.developer || req.body.developer
+        });
         next(error);
     }
 };
@@ -1307,16 +1330,16 @@ exports.getRecentLeads = async (req, res) => {
             })
             .populate({
                 path: "userId",
-                select: "name email phone profileImage" 
+                select: "name email phone profileImage"
             })
-            .sort({ createdAt: -1 })   
+            .sort({ createdAt: -1 })
             .limit(limit);
 
         const data = leads.map(item => ({
             leadId: item._id,
             userName: item.userId?.name || "",
             userPhone: item.userId?.phone || "",
-            userProfileImage: item.userId?.profileImage || "", 
+            userProfileImage: item.userId?.profileImage || "",
             propertyName: item.propertyId?.name || "",
             projectName: item.propertyId?.projectName || "",
             location: item.propertyId?.location || "",
