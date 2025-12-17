@@ -49,12 +49,15 @@ const propertySchema = new mongoose.Schema(
         },
 
         location: { type: String, required: true },
+        latitude: { type: Number },
+        longitude: { type: Number },
 
         projectSize: String,
         landParcel: String,
         possessionDate: Date,
         developerPrice: String,
-        groupPrice: String,
+        offerPrice: String,
+        discountPercentage: { type: String, default: "00.00%" },
         minGroupMembers: Number,
 
         reraId: String,
@@ -110,12 +113,42 @@ const propertySchema = new mongoose.Schema(
     { timestamps: true }
 );
 
+// Helper function to parse price string to number
+const parsePriceToNumber = (priceStr) => {
+    if (!priceStr) return 0;
+    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
+    const priceStrLower = priceStr.toLowerCase();
+    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+        priceNum = priceNum * 100000;
+    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+        priceNum = priceNum * 10000000;
+    }
+    return priceNum;
+};
+
 propertySchema.pre('save', async function (next) {
+    // Generate projectId if not exists
     if (!this.projectId) {
         const random = crypto.randomInt(10000, 99999);
         const formattedName = this.projectName.replace(/\s+/g, "");
         this.projectId = `#${formattedName}-${random}`;
     }
+
+    // Calculate discount percentage if developerPrice and offerPrice exist
+    if (this.developerPrice && this.offerPrice) {
+        const devPrice = parsePriceToNumber(this.developerPrice);
+        const offerPrice = parsePriceToNumber(this.offerPrice);
+
+        if (devPrice > 0 && offerPrice > 0 && devPrice > offerPrice) {
+            const discount = ((devPrice - offerPrice) / devPrice) * 100;
+            this.discountPercentage = `${discount.toFixed(2)}%`;
+        } else {
+            this.discountPercentage = "00.00%";
+        }
+    } else {
+        this.discountPercentage = "00.00%";
+    }
+
     next();
 });
 
