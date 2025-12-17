@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs/dist/bcrypt");
+const mongoose = require('mongoose');
 const Role = require("../models/role");
 const User = require("../models/user");
 const jwt = require('jsonwebtoken');
@@ -7,6 +8,7 @@ const Developer = require('../models/developer');
 const Property = require('../models/property');
 const leadModal = require("../models/leadModal");
 const LeadActivity = require("../models/leadActivity");
+const Notification = require("../models/notification");
 const { uploadToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
 
@@ -302,15 +304,44 @@ exports.getUserById = async (req, res, next) => {
 
 // ===================== CREATE PROPERTY =====================
 exports.createProperty = async (req, res, next) => {
+    let {
+        projectName, developer, location, latitude, longitude, projectSize, landParcel,
+        possessionDate, developerPrice, offerPrice, minGroupMembers,
+        reraId, possessionStatus, description, configurations,
+        highlights, amenities, layouts, connectivity,
+        relationshipManager, leadDistributionAgents,
+        isStatus
+    } = req.body;
     try {
-        let {
-            projectName, developer, location, latitude, longitude, projectSize, landParcel,
-            possessionDate, developerPrice, offerPrice, minGroupMembers,
-            reraId, possessionStatus, description, configurations,
-            highlights, amenities, layouts, connectivity,
-            relationshipManager, leadDistributionAgents,
-            isStatus
-        } = req.body;
+        // ---------- Safe JSON Parsing (MUST be done BEFORE validation) ----------
+        const safeJSON = (value, fallback) => {
+            try {
+                if (!value) return fallback;
+                if (typeof value === "object") return value;
+                return JSON.parse(value);
+            } catch {
+                return fallback;
+            }
+        };
+
+        // Parse JSON fields BEFORE validation queries
+        configurations = safeJSON(configurations, []);
+        highlights = safeJSON(highlights, []);
+        amenities = safeJSON(amenities, []);
+        layouts = safeJSON(layouts, []);
+        connectivity = safeJSON(connectivity, {});
+        leadDistributionAgents = safeJSON(leadDistributionAgents, []);
+
+        // Parse numeric fields
+        if (latitude) latitude = parseFloat(latitude);
+        if (longitude) longitude = parseFloat(longitude);
+        if (minGroupMembers) minGroupMembers = parseInt(minGroupMembers);
+        if (possessionDate) possessionDate = new Date(possessionDate);
+
+        // Initialize upload arrays
+        let uploadedImages = [];
+        let uploadedLayouts = [];
+        let uploadedQrImage = null;
 
         // ---------- Developer Validation ----------
         const dev = await Developer.findById(developer).lean();
@@ -351,11 +382,22 @@ exports.createProperty = async (req, res, next) => {
             return res.status(400).json({ success: false, message: "Role 'agent' not found" });
         }
 
-        if (leadDistributionAgents?.length > 0) {
+        // Validate leadDistributionAgents - ensure it's an array and contains valid ObjectIds
+        if (leadDistributionAgents && Array.isArray(leadDistributionAgents) && leadDistributionAgents.length > 0) {
+            // Filter out invalid ObjectIds
+            const validAgentIds = leadDistributionAgents.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+            if (validAgentIds.length !== leadDistributionAgents.length) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid agent IDs provided"
+                });
+            }
+
             const validAgents = await User.find({
-                _id: { $in: leadDistributionAgents },
+                _id: { $in: validAgentIds },
                 role: agentRole._id
-            });
+            }).select('_id').lean();
 
             if (validAgents.length !== leadDistributionAgents.length) {
                 return res.status(400).json({
@@ -363,46 +405,27 @@ exports.createProperty = async (req, res, next) => {
                     message: "All lead distribution agents must have role 'agent'"
                 });
             }
+        } else if (leadDistributionAgents && !Array.isArray(leadDistributionAgents)) {
+            // If leadDistributionAgents is provided but not an array, set it to empty array
+            leadDistributionAgents = [];
         }
 
-        // ---------- Safe JSON Parsing ----------
-        const safeJSON = (value, fallback) => {
-            try {
-                if (!value) return fallback;
-                if (typeof value === "object") return value;
-                return JSON.parse(value);
-            } catch {
-                return fallback;
-            }
-        };
-
-        configurations = safeJSON(configurations, []);
-        highlights = safeJSON(highlights, []);
-        amenities = safeJSON(amenities, []);
-        layouts = safeJSON(layouts, []);
-        connectivity = safeJSON(connectivity, {});
-        leadDistributionAgents = safeJSON(leadDistributionAgents, []);
-
         // ---------- File Upload ----------
-        let uploadedImages = [];
-        let uploadedLayouts = [];
-        let uploadedQrImage = null;
-
-        if (req.files?.images) {
-            for (let file of req.files.images) {
-                const url = await uploadToS3(file);
+        if (req.files?.images && req.files.images.length > 0) {
+            for (let i = 0; i < req.files.images.length; i++) {
+                const file = req.files.images[i];
+                const url = await uploadToS3(file, 'properties/images');
                 uploadedImages.push({
                     url,
-                    isCover: false,
-                    order: uploadedImages.length + 1
+                    isCover: i === 0, // First image is cover image
+                    order: i + 1
                 });
             }
         }
 
-        if (req.files?.layouts) {
+        if (req.files?.layouts && req.files.layouts.length > 0) {
             for (let i = 0; i < req.files.layouts.length; i++) {
-                const url = await uploadToS3(req.files.layouts[i]);
-
+                const url = await uploadToS3(req.files.layouts[i], 'properties/layouts');
                 uploadedLayouts.push({
                     image: url,
                     configurationUnitType: layouts[i]?.configurationUnitType || null
@@ -410,9 +433,9 @@ exports.createProperty = async (req, res, next) => {
             }
         }
 
-        if (req.files?.reraQrImage) {
+        if (req.files?.reraQrImage && req.files.reraQrImage.length > 0) {
             const qrFile = req.files.reraQrImage[0];
-            uploadedQrImage = await uploadToS3(qrFile);
+            uploadedQrImage = await uploadToS3(qrFile, 'properties/rera');
         }
 
         // Helper function to calculate discount percentage
@@ -476,7 +499,7 @@ exports.createProperty = async (req, res, next) => {
         // ---------- Extra Return Data ----------
         // Optimize queries with lean() and run in parallel
         const [developers, relationshipManagers, agents] = await Promise.all([
-            Developer.find().select("_id name").lean(),
+            Developer.findOne({ _id: developer }).select("_id name").lean(),
             User.find({ role: projectManagerRole._id }).select("_id name email").lean(),
             User.find({ role: agentRole._id }).select("_id name email").lean()
         ]);
@@ -501,7 +524,13 @@ exports.createProperty = async (req, res, next) => {
         });
 
     } catch (error) {
-        logError('Error creating property', error, { projectName, developer, location });
+        logError('Error creating property', error,
+            {
+                projectName: projectName || req.body?.projectName || 'N/A',
+                developer: developer || req.body?.developer || 'N/A',
+                location: location || req.body?.location || 'N/A'
+            }
+        );
         next(error);
     }
 };
@@ -528,7 +557,7 @@ exports.getAllProperties = async (req, res, next) => {
         const total = await Property.countDocuments(filters);
 
         const properties = await Property.find(filters)
-            .populate('developer', 'name')
+            .populate('developer', 'developerName')
             .populate('relationshipManager', 'name')
             .populate('leadDistributionAgents', 'name')
             .skip((page - 1) * limit)
@@ -607,8 +636,13 @@ exports.getAllProperties = async (req, res, next) => {
         const enhancedProperties = properties.map((property) => {
             const p = { ...property };
 
-            p.layouts = p.layouts.map((layout) => {
-                const config = p.configurations.find((c) => c.unitType === layout.configurationUnitType);
+            // Ensure images and layouts are included (even if empty arrays)
+            p.images = p.images || [];
+            p.layouts = p.layouts || [];
+
+            // Map layouts with configuration info
+            p.layouts = (p.layouts || []).map((layout) => {
+                const config = (p.configurations || []).find((c) => c.unitType === layout.configurationUnitType);
                 return {
                     ...layout,
                     configuration: config || null
@@ -1028,71 +1062,155 @@ exports.deleteDeveloper = async (req, res, next) => {
 
 // ===================== GET LEAD LIST =====================
 // GET LEADS LIST
+// ===================== GET ALL LEADS =====================
+// @desc    Get all leads for logged-in user (filtered by their properties)
+// @route   GET /api/admin/lead_list
+// @access  Private (Admin/Agent)
 exports.getLeadsList = async (req, res) => {
     try {
-        const filter = {};
+        const userId = req.user.userId;
+        const { dateRange, page = 1, limit = 10 } = req.query;
 
-        if (req.user.roleName.toLowerCase() === 'user') {
-            filter.userId = req.user.userId;
+        // Get properties where user is relationshipManager or leadDistributionAgents
+        const userProperties = await Property.find({
+            $or: [
+                { relationshipManager: userId },
+                { leadDistributionAgents: userId }
+            ],
+            isStatus: true
+        }).select('_id').lean();
+
+        const propertyIds = userProperties.map(p => p._id);
+
+        // Build filter
+        let filter = { isStatus: true };
+
+        // Filter by user's properties
+        if (propertyIds.length > 0) {
+            filter.propertyId = { $in: propertyIds };
+        } else {
+            // If no properties, return empty results
+            return res.json({
+                success: true,
+                message: "Lead list fetched successfully",
+                data: [],
+                pagination: { total: 0, page: parseInt(page), limit: parseInt(limit), totalPages: 0 }
+            });
         }
 
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
+        // Date range filter
+        if (dateRange === 'last_month') {
+            const now = new Date();
+            const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            filter.createdAt = { $gte: lastMonth };
+        }
 
-        const total = await leadModal.countDocuments();
-        const leads = await leadModal.find()
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const total = await leadModal.countDocuments(filter);
+
+        const leads = await leadModal.find(filter)
             .populate({
                 path: "propertyId",
-                select: "projectName name location relationshipManager",
+                select: "projectName projectId name location relationshipManager",
                 populate: { path: "relationshipManager", select: "name" }
             })
-            .populate("userId", "name email phone profileImage")
+            .populate("userId", "name email phoneNumber countryCode profileImage")
             .populate("relationshipManagerId", "name email phone")
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(parseInt(limit))
+            .lean();
 
-        const formattedData = leads.map(item => ({
-            leadId: item._id,
-            userName: item.userId?.name,
-            email: item.userId?.email,
-            phone: item.userId?.phone,
-            propertyName: item.propertyId?.projectName || item.propertyId?.name || 'N/A (Contact Us)',
-            location: item.propertyId?.location || 'N/A',
-            propertyId: item.propertyId?._id || null,
-            relationshipManager: item.propertyId?.relationshipManager?.name || item.relationshipManagerId?.name || "",
-            rmEmail: item.rmEmail || '',
-            rmPhone: item.rmPhone || '',
-            message: item.message || '',
-            source: item.source || 'origin',
-            date: item.createdAt.toLocaleDateString(),
-            time: item.createdAt.toLocaleTimeString(),
-            status: item.status || "Pending",
-            visitStatus: item.visitStatus || 'not_visited',
-            isContactUs: !item.propertyId // Flag to identify contact us leads
-        }));
+        // Format status for display
+        const formatStatus = (status) => {
+            const statusMap = {
+                'lead_received': 'Lead Received',
+                'interested': 'Interested',
+                'no_response_dnp': 'No Response - Do Not Pick (DNP)',
+                'unable_to_contact': 'Unable to Contact',
+                'call_back_scheduled': 'Call Back Scheduled',
+                'demo_discussion_ongoing': 'Demo Discussion Ongoing',
+                'site_visit_coordination': 'Site Visit Coordination in Progress',
+                'site_visit_confirmed': 'Site Visit Confirmed',
+                'commercial_negotiation': 'Commercial Negotiation',
+                'deal_closed': 'Deal Closed',
+                'declined_interest': 'Declined Interest',
+                'does_not_meet_requirements': 'Does Not Meet Requirements',
+                'pending': 'Pending',
+                'approved': 'Approved',
+                'rejected': 'Rejected'
+            };
+            return statusMap[status] || status;
+        };
+
+        // Format date (e.g., "2 June, 2025, 02:23 AM")
+        const formatDate = (date) => {
+            const d = new Date(date);
+            const day = d.getDate();
+            const month = d.toLocaleDateString('en-IN', { month: 'long' });
+            const year = d.getFullYear();
+            const time = d.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+            return `${day} ${month}, ${year}, ${time}`;
+        };
+
+        // Format phone number
+        const formatPhone = (user) => {
+            if (!user || !user.phoneNumber) return 'N/A';
+            const countryCode = user.countryCode || '+91';
+            const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+            if (phoneDigits.length === 10) {
+                return `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+            }
+            return `${countryCode} ${user.phoneNumber}`;
+        };
+
+        const formattedData = leads.map(item => {
+            const user = item.userId || {};
+            const property = item.propertyId || {};
+
+            return {
+                _id: item._id,
+                leadName: user.name || 'N/A',
+                phoneNumber: formatPhone(user),
+                profileImage: user.profileImage || null,
+                projectId: property.projectId || 'N/A',
+                projectName: property.projectName || property.name || 'N/A (Contact Us)',
+                location: property.location || 'N/A',
+                source: item.source || 'origin',
+                status: formatStatus(item.status || 'lead_received'),
+                statusValue: item.status || 'lead_received',
+                date: formatDate(item.createdAt || item.date),
+                createdAt: item.createdAt,
+                updatedAt: item.updatedAt
+            };
+        });
+
+        logInfo('Lead list fetched', { userId, total, page, limit });
 
         res.json({
             success: true,
             message: "Lead list fetched successfully",
             data: formattedData,
-            pagination: { total, page, limit, totalPages: Math.ceil(total / limit) }
+            pagination: { total, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(total / parseInt(limit)) }
         });
 
     } catch (error) {
+        logError('Error fetching lead list', error, { userId: req.user?.userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
-// ===================== GET LEAD DETAILS =====================
+// ===================== GET LEAD BY ID =====================
+// @desc    Get detailed lead information with timeline
+// @route   GET /api/admin/view_lead_list/:leadId
+// @access  Private (Admin/Agent)
 exports.viewLeadDetails = async (req, res) => {
     try {
-        // Admin check
-        if (req.user.roleName.toLowerCase() === 'user') {
-            return res.status(403).json({ success: false, message: 'Access denied, admin only' });
-        }
-
         const { leadId } = req.params;
+        const userId = req.user.userId;
 
         const lead = await leadModal.findById(leadId)
             .populate({
@@ -1105,12 +1223,13 @@ exports.viewLeadDetails = async (req, res) => {
             })
             .populate({
                 path: "userId",
-                select: "name email phone profileImage"
+                select: "name email phoneNumber countryCode profileImage"
             })
             .populate({
                 path: "relationshipManagerId",
                 select: "name email phone"
-            });
+            })
+            .lean();
 
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
@@ -1118,23 +1237,64 @@ exports.viewLeadDetails = async (req, res) => {
 
         // Get timeline activities for this lead
         const timelineActivities = await LeadActivity.find({ leadId: lead._id })
-            .populate('performedBy', 'name email phone profileImage')
+            .populate('performedBy', 'name email phoneNumber countryCode profileImage')
             .sort({ activityDate: -1 })
             .lean();
 
-        // Format timeline activities
-        const formattedTimeline = timelineActivities.map(activity => {
+        // Format timeline activities with proper descriptions
+        const formatTimelineDescription = (activity) => {
             const performer = activity.performedBy || {};
+            const performerName = activity.performedByName || performer.name || 'Admin';
+            const date = new Date(activity.activityDate);
+            const formattedDate = date.toLocaleDateString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+
+            let description = '';
+            if (activity.activityType === 'phone_call') {
+                description = `${formattedDate} - Phone call by ${performerName}`;
+            } else if (activity.activityType === 'whatsapp') {
+                description = `${formattedDate} - Whatsapp message sent by ${performerName}`;
+            } else if (activity.activityType === 'email') {
+                description = `${formattedDate} - Email sent by ${performerName}`;
+            } else if (activity.activityType === 'visit') {
+                description = `${formattedDate} - Site Visit Coordinated by ${performerName}`;
+            } else if (activity.activityType === 'follow_up') {
+                const followUpDate = activity.nextFollowUpDate
+                    ? new Date(activity.nextFollowUpDate).toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    })
+                    : '';
+                description = `${formattedDate} - Follow up scheduled by ${performerName}${followUpDate ? ` for ${followUpDate}` : ''}`;
+            } else if (activity.activityType === 'status_update') {
+                description = `${formattedDate} - Status updated from ${activity.oldStatus || 'N/A'} to ${activity.newStatus || 'N/A'} by ${performerName}`;
+            } else if (activity.activityType === 'remark_update') {
+                description = `${formattedDate} - Remark updated by ${performerName}`;
+            } else if (activity.activityType === 'join_group') {
+                description = `${formattedDate} - Lead Received`;
+            } else {
+                description = activity.description || `${formattedDate} - Activity by ${performerName}`;
+            }
+
             return {
                 id: activity._id,
                 activityType: activity.activityType,
                 activityDate: activity.activityDate,
+                formattedDate: formattedDate,
+                description: description,
                 performedBy: {
                     id: performer._id,
-                    name: activity.performedByName || performer.name || 'N/A',
+                    name: performerName,
                     profileImage: performer.profileImage || null
                 },
-                description: activity.description,
                 nextFollowUpDate: activity.nextFollowUpDate || null,
                 visitDate: activity.visitDate || null,
                 visitTime: activity.visitTime || null,
@@ -1142,12 +1302,45 @@ exports.viewLeadDetails = async (req, res) => {
                 newStatus: activity.newStatus || null,
                 metadata: activity.metadata || {}
             };
-        });
+        };
 
-        // Get next follow-up date (if any)
-        const nextFollowUp = timelineActivities
-            .filter(a => a.nextFollowUpDate && new Date(a.nextFollowUpDate) > new Date())
-            .sort((a, b) => new Date(a.nextFollowUpDate) - new Date(b.nextFollowUpDate))[0];
+        const formattedTimeline = timelineActivities.map(formatTimelineDescription);
+
+        // Get next follow-up date (if any) - check both scheduleDate and activities
+        let nextFollowUp = null;
+        if (lead.scheduleDate) {
+            const scheduleDate = new Date(lead.scheduleDate);
+            nextFollowUp = {
+                date: scheduleDate,
+                formattedDate: scheduleDate.toLocaleDateString('en-IN', {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                }),
+                isOverdue: scheduleDate < new Date()
+            };
+        } else {
+            const upcomingFollowUp = timelineActivities
+                .filter(a => a.nextFollowUpDate && new Date(a.nextFollowUpDate) > new Date())
+                .sort((a, b) => new Date(a.nextFollowUpDate) - new Date(b.nextFollowUpDate))[0];
+
+            if (upcomingFollowUp) {
+                const followUpDate = new Date(upcomingFollowUp.nextFollowUpDate);
+                nextFollowUp = {
+                    date: followUpDate,
+                    formattedDate: followUpDate.toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    }),
+                    isOverdue: followUpDate < new Date()
+                };
+            }
+        }
 
         // Format property details (null if contact us lead)
         const property = lead.propertyId || null;
@@ -1167,44 +1360,88 @@ exports.viewLeadDetails = async (req, res) => {
 
         // Format user details
         const user = lead.userId || {};
+        const formatPhone = (user) => {
+            if (!user || !user.phoneNumber) return 'N/A';
+            const countryCode = user.countryCode || '+91';
+            const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+            if (phoneDigits.length === 10) {
+                return `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+            }
+            return `${countryCode} ${user.phoneNumber}`;
+        };
+
+        // Format date (e.g., "2 June, 2025, 02:23 AM")
+        const formatDate = (date) => {
+            const d = new Date(date);
+            const day = d.getDate();
+            const month = d.toLocaleDateString('en-IN', { month: 'long' });
+            const year = d.getFullYear();
+            const time = d.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+            return `${day} ${month}, ${year}, ${time}`;
+        };
+
         const userDetails = {
             id: user._id,
             name: user.name || 'N/A',
             email: user.email || 'N/A',
-            phone: user.phone || 'N/A',
+            phoneNumber: formatPhone(user),
             profileImage: user.profileImage || null
         };
 
+        // Format status
+        const formatStatus = (status) => {
+            const statusMap = {
+                'lead_received': 'Lead Received',
+                'interested': 'Interested',
+                'no_response_dnp': 'No Response - Do Not Pick (DNP)',
+                'unable_to_contact': 'Unable to Contact',
+                'call_back_scheduled': 'Call Back Scheduled',
+                'demo_discussion_ongoing': 'Demo Discussion Ongoing',
+                'site_visit_coordination': 'Site Visit Coordination in Progress',
+                'site_visit_confirmed': 'Site Visit Confirmed',
+                'commercial_negotiation': 'Commercial Negotiation',
+                'deal_closed': 'Deal Closed',
+                'declined_interest': 'Declined Interest',
+                'does_not_meet_requirements': 'Does Not Meet Requirements',
+                'pending': 'Pending',
+                'approved': 'Approved',
+                'rejected': 'Rejected'
+            };
+            return statusMap[status] || status;
+        };
+
         const data = {
-            leadId: lead._id,
+            _id: lead._id,
+            leadName: user.name || 'N/A',
+            date: formatDate(lead.createdAt || lead.date),
+            phoneNumber: formatPhone(user),
+            projectId: property ? (property.projectId || 'N/A') : 'N/A',
+            source: lead.source || 'origin',
+            ipAddress: lead.ipAddress || 'N/A',
+            remark: lead.message || '',
+            status: formatStatus(lead.status || 'lead_received'),
+            statusValue: lead.status || 'lead_received',
+            visitStatus: lead.visitStatus || 'not_visited',
             user: userDetails,
             property: propertyDetails,
             rmEmail: lead.rmEmail || '',
             rmPhone: lead.rmPhone || '',
-            message: lead.message || '',
-            status: lead.status || 'pending',
-            visitStatus: lead.visitStatus || 'not_visited',
-            source: lead.source || 'origin',
             createdAt: lead.createdAt,
             updatedAt: lead.updatedAt,
             timeline: formattedTimeline,
-            nextFollowUp: nextFollowUp ? {
-                date: nextFollowUp.nextFollowUpDate,
-                formattedDate: new Date(nextFollowUp.nextFollowUpDate).toLocaleDateString('en-IN', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                }),
-                isOverdue: new Date(nextFollowUp.nextFollowUpDate) < new Date()
-            } : null
+            nextFollowUp: nextFollowUp
         };
+
+        logInfo('Lead details fetched', { leadId, userId });
 
         res.json({ success: true, message: "Lead details fetched successfully", data });
 
     } catch (error) {
-        console.error(error);
+        logError('Error fetching lead details', error, { leadId: req.params.leadId, userId: req.user?.userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -1220,7 +1457,7 @@ exports.addLeadActivity = async (req, res) => {
         const performedByName = req.user.name || 'Admin';
 
         // Validate lead exists
-        const lead = await leadModal.findById(leadId).select('_id userId propertyId').lean();
+        const lead = await leadModal.findById(leadId).populate('userId', 'name').select('_id userId propertyId').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
@@ -1273,6 +1510,53 @@ exports.addLeadActivity = async (req, res) => {
             );
         }
 
+        // Create notification based on activity type
+        const leadUser = lead?.userId || {};
+
+        let notificationTitle = '';
+        let notificationMessage = '';
+        let notificationMetadata = {};
+
+        if (activityType === 'phone_call') {
+            notificationTitle = 'Call Activity';
+            notificationMessage = `Call By ${performedByName}`;
+            notificationMetadata = { activityDescription: description || '' };
+        } else if (activityType === 'whatsapp') {
+            notificationTitle = 'WhatsApp Message';
+            notificationMessage = `WhatsApp Message on ${leadUser.name || 'Lead'}`;
+            notificationMetadata = { activityDescription: description || '' };
+        } else if (activityType === 'follow_up') {
+            notificationTitle = 'Follow-up Reminder';
+            notificationMessage = 'This is a reminder for the upcoming follow-up regarding:';
+            notificationMetadata = {
+                nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
+                activityDescription: description || ''
+            };
+        } else if (activityType === 'email') {
+            notificationTitle = 'Email Activity';
+            notificationMessage = `Email sent by ${performedByName}`;
+            notificationMetadata = { activityDescription: description || '' };
+        } else if (activityType === 'visit') {
+            notificationTitle = 'Visit Activity';
+            notificationMessage = `Visit scheduled by ${performedByName}`;
+            notificationMetadata = {
+                visitDate: visitDate ? new Date(visitDate) : null,
+                visitTime: visitTime || null
+            };
+        }
+
+        if (notificationTitle && notificationMessage) {
+            await createNotification(
+                leadId,
+                activityType,
+                performedByName,
+                performedBy,
+                notificationTitle,
+                notificationMessage,
+                notificationMetadata
+            );
+        }
+
         logInfo('Lead activity added', {
             leadId,
             activityType,
@@ -1311,7 +1595,23 @@ exports.updateLeadStatus = async (req, res) => {
         const performedByName = req.user.name || 'Admin';
 
         // Validate status
-        const validStatuses = ['pending', 'approved', 'rejected'];
+        const validStatuses = [
+            'lead_received',
+            'interested',
+            'no_response_dnp',
+            'unable_to_contact',
+            'call_back_scheduled',
+            'demo_discussion_ongoing',
+            'site_visit_coordination',
+            'site_visit_confirmed',
+            'commercial_negotiation',
+            'deal_closed',
+            'declined_interest',
+            'does_not_meet_requirements',
+            'pending',
+            'approved',
+            'rejected'
+        ];
         if (!validStatuses.includes(status)) {
             return res.status(400).json({
                 success: false,
@@ -1348,6 +1648,24 @@ exports.updateLeadStatus = async (req, res) => {
             newStatus: status,
             metadata: { remark: remark || null }
         });
+
+        // Create notification for status update
+        const leadForNotification = await leadModal.findById(leadId).populate('userId', 'name').lean();
+        const leadUser = leadForNotification?.userId || {};
+
+        await createNotification(
+            leadId,
+            'status_update',
+            performedByName,
+            performedBy,
+            'Status Update',
+            `Status updated from ${oldStatus} to ${status} for ${leadUser.name || 'Lead'}`,
+            {
+                oldStatus,
+                newStatus: status,
+                activityDescription: remark || ''
+            }
+        );
 
         logInfo('Lead status updated', {
             leadId,
@@ -2322,6 +2640,1079 @@ exports.getFilteredLeads = async (req, res) => {
         });
 
     } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== CRM DASHBOARD API =====================
+// @desc    Get CRM Dashboard with KPIs, Today's Follow Ups, and Lead List with Filtering & Sorting
+// @route   GET /api/admin/crm-dashboard
+// @access  Private (Admin/Agent)
+exports.getCRMDashboard = async (req, res, next) => {
+    try {
+        const userId = req.user.userId;
+        const {
+            dateRange = 'past_24_hours', // past_24_hours, past_7_days, past_30_days
+            sortBy = 'newest_first', // newest_first, oldest_first, name_asc, name_desc
+            page = 1,
+            limit = 10
+        } = req.query;
+
+        // Step 1: Get properties where user is relationshipManager or leadDistributionAgents
+        const userProperties = await Property.find({
+            $or: [
+                { relationshipManager: userId },
+                { leadDistributionAgents: userId }
+            ],
+            isStatus: true
+        }).select('_id').lean();
+
+        const propertyIds = userProperties.map(p => p._id);
+
+        // Step 2: Build date filter based on dateRange
+        const now = new Date();
+        let dateFilter = {};
+
+        if (dateRange === 'past_24_hours') {
+            const startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            dateFilter.createdAt = { $gte: startDate };
+        } else if (dateRange === 'past_7_days') {
+            const startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            dateFilter.createdAt = { $gte: startDate };
+        } else if (dateRange === 'past_30_days') {
+            const startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+            dateFilter.createdAt = { $gte: startDate };
+        }
+
+        // Step 3: Build lead filter (only leads for user's properties)
+        const leadFilter = {
+            isStatus: true,
+            ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
+        };
+
+        // If no properties found, return empty results
+        if (propertyIds.length === 0) {
+            return res.json({
+                success: true,
+                message: "CRM Dashboard data fetched",
+                data: {
+                    kpis: {
+                        leadsReceived: 0,
+                        leadsContacted: 0,
+                        leadsContactedPercentage: 0,
+                        responseTime: "0H"
+                    },
+                    todaysFollowUps: [],
+                    leads: [],
+                    pagination: {
+                        total: 0,
+                        page: parseInt(page),
+                        limit: parseInt(limit),
+                        totalPages: 0
+                    }
+                }
+            });
+        }
+
+        // Step 4: Calculate KPIs in parallel
+        const [totalLeads, contactedLeads, allLeadsForResponseTime] = await Promise.all([
+            // Total leads received (in date range)
+            leadModal.countDocuments({
+                ...leadFilter,
+                ...dateFilter
+            }),
+            // Leads contacted (have visitStatus 'visited' or 'follow_up')
+            leadModal.countDocuments({
+                ...leadFilter,
+                ...dateFilter,
+                visitStatus: { $in: ['visited', 'follow_up'] }
+            }),
+            // All leads for response time calculation
+            leadModal.find({
+                ...leadFilter,
+                ...dateFilter
+            }).select('createdAt relationshipManagerId').lean()
+        ]);
+
+        // Calculate response time (average time from lead creation to first contact)
+        let avgResponseTimeHours = 0;
+        if (contactedLeads > 0) {
+            // Get first contact activity for contacted leads
+            const contactedLeadIds = await leadModal.find({
+                ...leadFilter,
+                ...dateFilter,
+                visitStatus: { $in: ['visited', 'follow_up'] }
+            }).select('_id createdAt').lean();
+
+            const leadIds = contactedLeadIds.map(l => l._id);
+
+            if (leadIds.length > 0) {
+                const firstContacts = await LeadActivity.aggregate([
+                    {
+                        $match: {
+                            leadId: { $in: leadIds },
+                            activityType: { $in: ['phone_call', 'whatsapp', 'email', 'visit'] }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: '$leadId',
+                            firstContactDate: { $min: '$activityDate' }
+                        }
+                    }
+                ]);
+
+                // Calculate average response time
+                let totalResponseTime = 0;
+                let count = 0;
+
+                for (const contact of firstContacts) {
+                    const lead = contactedLeadIds.find(l => l._id.toString() === contact._id.toString());
+                    if (lead) {
+                        const responseTimeMs = new Date(contact.firstContactDate) - new Date(lead.createdAt);
+                        const responseTimeHours = responseTimeMs / (1000 * 60 * 60);
+                        if (responseTimeHours > 0) {
+                            totalResponseTime += responseTimeHours;
+                            count++;
+                        }
+                    }
+                }
+
+                avgResponseTimeHours = count > 0 ? Math.round(totalResponseTime / count) : 0;
+            }
+        }
+
+        const leadsContactedPercentage = totalLeads > 0
+            ? Math.round((contactedLeads / totalLeads) * 100)
+            : 0;
+
+        // Step 5: Get Today's Follow Ups
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        // Get leads with follow-up activities scheduled for today
+        const followUpActivities = await LeadActivity.find({
+            activityType: 'follow_up',
+            nextFollowUpDate: {
+                $gte: today,
+                $lt: tomorrow
+            }
+        })
+            .populate({
+                path: 'leadId',
+                match: {
+                    ...leadFilter,
+                    isStatus: true
+                },
+                populate: [
+                    {
+                        path: 'userId',
+                        select: 'name email phoneNumber countryCode profileImage'
+                    },
+                    {
+                        path: 'propertyId',
+                        select: 'projectName location'
+                    }
+                ]
+            })
+            .sort({ nextFollowUpDate: 1 })
+            .lean();
+
+        // Filter out null leads (from populate match)
+        const todaysFollowUps = followUpActivities
+            .filter(activity => activity.leadId !== null)
+            .map(activity => {
+                const lead = activity.leadId;
+                const user = lead.userId || {};
+                const property = lead.propertyId || {};
+
+                // Format date (e.g., "2 June, 2025, 02:23 AM")
+                const followUpDate = new Date(activity.nextFollowUpDate);
+                const day = followUpDate.getDate();
+                const month = followUpDate.toLocaleDateString('en-IN', { month: 'long' });
+                const year = followUpDate.getFullYear();
+                const time = followUpDate.toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                const formattedDate = `${day} ${month}, ${year}, ${time}`;
+
+                // Format source (e.g., "Mumbai - Landing.")
+                let formattedSource = lead.source || 'origin';
+                if (property.location) {
+                    formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
+                }
+
+                // Format phone number (e.g., "+91 956 256 2648")
+                let formattedPhone = 'N/A';
+                if (user.phoneNumber) {
+                    const countryCode = user.countryCode || '+91';
+                    // Format phone number with spaces (e.g., "956 256 2648")
+                    const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+                    if (phoneDigits.length === 10) {
+                        formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+                    } else {
+                        formattedPhone = `${countryCode} ${user.phoneNumber}`;
+                    }
+                }
+
+                return {
+                    _id: lead._id,
+                    clientName: user.name || 'N/A',
+                    phoneNumber: formattedPhone,
+                    profileImage: user.profileImage || null,
+                    projectName: property.projectName || 'N/A',
+                    location: property.location || 'N/A',
+                    date: formattedDate,
+                    dueTime: followUpDate.toLocaleTimeString('en-IN', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    }),
+                    source: formattedSource,
+                    createdAt: lead.createdAt,
+                    updatedAt: lead.updatedAt
+                };
+            });
+
+        // Step 6: Get leads list with sorting and pagination
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        // Get total count for pagination
+        const totalLeadsCount = await leadModal.countDocuments({
+            ...leadFilter,
+            ...dateFilter
+        });
+
+        // Get leads - use aggregation for name sorting, regular query for date sorting
+        let leads = [];
+
+        if (sortBy === 'name_asc' || sortBy === 'name_desc') {
+            // Use aggregation for name-based sorting
+            const sortOrder = sortBy === 'name_asc' ? 1 : -1;
+
+            const leadsAggregation = await leadModal.aggregate([
+                { $match: { ...leadFilter, ...dateFilter } },
+                {
+                    $lookup: {
+                        from: 'users',
+                        localField: 'userId',
+                        foreignField: '_id',
+                        as: 'user'
+                    }
+                },
+                { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+                {
+                    $addFields: {
+                        userName: { $ifNull: ['$user.name', ''] }
+                    }
+                },
+                { $sort: { userName: sortOrder } },
+                { $skip: skip },
+                { $limit: parseInt(limit) },
+                {
+                    $lookup: {
+                        from: 'properties',
+                        localField: 'propertyId',
+                        foreignField: '_id',
+                        as: 'property'
+                    }
+                },
+                { $unwind: { path: '$property', preserveNullAndEmptyArrays: true } }
+            ]);
+
+            // Format aggregation results
+            leads = leadsAggregation.map(item => ({
+                _id: item._id,
+                userId: item.user || null,
+                propertyId: item.property || null,
+                createdAt: item.createdAt,
+                date: item.date,
+                source: item.source,
+                visitStatus: item.visitStatus,
+                status: item.status,
+                updatedAt: item.updatedAt
+            }));
+        } else {
+            // Use regular query for date-based sorting
+            let sortCriteria = {};
+            if (sortBy === 'newest_first') {
+                sortCriteria = { createdAt: -1 };
+            } else if (sortBy === 'oldest_first') {
+                sortCriteria = { createdAt: 1 };
+            } else {
+                sortCriteria = { createdAt: -1 }; // Default
+            }
+
+            leads = await leadModal.find({
+                ...leadFilter,
+                ...dateFilter
+            })
+                .populate({
+                    path: 'userId',
+                    select: 'name email phoneNumber countryCode profileImage'
+                })
+                .populate({
+                    path: 'propertyId',
+                    select: 'projectName location'
+                })
+                .sort(sortCriteria)
+                .skip(skip)
+                .limit(parseInt(limit))
+                .lean();
+        }
+
+        // Format leads for response
+        const formattedLeads = leads.map(lead => {
+            const user = lead.userId || {};
+            const property = lead.propertyId || {};
+
+            // Format date (e.g., "2 June, 2025, 02:23 AM")
+            const leadDate = new Date(lead.createdAt || lead.date);
+            const day = leadDate.getDate();
+            const month = leadDate.toLocaleDateString('en-IN', { month: 'long' });
+            const year = leadDate.getFullYear();
+            const time = leadDate.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+            const formattedDate = `${day} ${month}, ${year}, ${time}`;
+
+            // Format source (e.g., "Mumbai - Landing.")
+            let formattedSource = lead.source || 'origin';
+            if (property.location) {
+                formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
+            }
+
+            // Format phone number (e.g., "+91 956 256 2648")
+            let formattedPhone = 'N/A';
+            if (user.phoneNumber) {
+                const countryCode = user.countryCode || '+91';
+                // Format phone number with spaces (e.g., "956 256 2648")
+                const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+                if (phoneDigits.length === 10) {
+                    formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+                } else {
+                    formattedPhone = `${countryCode} ${user.phoneNumber}`;
+                }
+            }
+
+            return {
+                _id: lead._id,
+                clientName: user.name || 'N/A',
+                phoneNumber: formattedPhone,
+                profileImage: user.profileImage || null,
+                projectName: property.projectName || 'N/A',
+                location: property.location || 'N/A',
+                date: formattedDate,
+                source: formattedSource,
+                visitStatus: lead.visitStatus || 'not_visited',
+                status: lead.status || 'pending',
+                createdAt: lead.createdAt,
+                updatedAt: lead.updatedAt
+            };
+        });
+
+        logInfo('CRM Dashboard data fetched', {
+            userId,
+            dateRange,
+            sortBy,
+            totalLeads,
+            contactedLeads,
+            todaysFollowUpsCount: todaysFollowUps.length
+        });
+
+        res.json({
+            success: true,
+            message: "CRM Dashboard data fetched successfully",
+            data: {
+                kpis: {
+                    leadsReceived: totalLeads,
+                    leadsContacted: contactedLeads,
+                    leadsContactedPercentage: leadsContactedPercentage,
+                    responseTime: `${avgResponseTimeHours}H`
+                },
+                todaysFollowUps: todaysFollowUps,
+                leads: formattedLeads,
+                pagination: {
+                    total: totalLeadsCount,
+                    page: parseInt(page),
+                    limit: parseInt(limit),
+                    totalPages: Math.ceil(totalLeadsCount / parseInt(limit))
+                }
+            }
+        });
+
+    } catch (error) {
+        logError('Error fetching CRM dashboard', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET NOTIFICATIONS =====================
+// @desc    Get notifications for logged-in user, grouped by date
+// @route   GET /api/admin/notifications
+// @access  Private (Admin/Agent)
+exports.getNotifications = async (req, res, next) => {
+    try {
+        const userId = req.user.userId;
+
+        // Get properties where user is relationshipManager or leadDistributionAgents
+        const userProperties = await Property.find({
+            $or: [
+                { relationshipManager: userId },
+                { leadDistributionAgents: userId }
+            ],
+            isStatus: true
+        }).select('_id').lean();
+
+        const propertyIds = userProperties.map(p => p._id);
+
+        // Build filter - only notifications for user's properties
+        const filter = {
+            userId,
+            ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
+        };
+
+        // If no properties found, return empty results
+        if (propertyIds.length === 0) {
+            return res.json({
+                success: true,
+                message: "Notifications fetched",
+                data: []
+            });
+        }
+
+        // Get all notifications for user
+        const notifications = await Notification.find(filter)
+            .populate({
+                path: 'leadId',
+                select: 'userId propertyId',
+                populate: {
+                    path: 'userId',
+                    select: 'name'
+                }
+            })
+            .populate({
+                path: 'propertyId',
+                select: 'projectName projectId'
+            })
+            .populate({
+                path: 'sourceId',
+                select: 'name'
+            })
+            .sort({ createdAt: -1 })
+            .lean();
+
+        // Helper function to get date label (Today, Yesterday, or formatted date)
+        const getDateLabel = (date) => {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            const yesterday = new Date(today);
+            yesterday.setDate(yesterday.getDate() - 1);
+
+            const notificationDate = new Date(date);
+            notificationDate.setHours(0, 0, 0, 0);
+
+            if (notificationDate.getTime() === today.getTime()) {
+                return 'Today';
+            } else if (notificationDate.getTime() === yesterday.getTime()) {
+                return 'Yesterday';
+            } else {
+                return notificationDate.toLocaleDateString('en-IN', {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric'
+                });
+            }
+        };
+
+        // Group notifications by date label
+        const grouped = {};
+
+        for (const notification of notifications) {
+            const dateLabel = getDateLabel(notification.createdAt);
+
+            if (!grouped[dateLabel]) {
+                grouped[dateLabel] = [];
+            }
+
+            // Calculate "X hours ago" or "X days ago"
+            const now = new Date();
+            const notificationTime = new Date(notification.createdAt);
+            const diffMs = now - notificationTime;
+            const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
+            const diffDays = Math.floor(diffHours / 24);
+
+            let timeAgo = '';
+            if (diffHours < 1) {
+                const diffMins = Math.floor(diffMs / (1000 * 60));
+                timeAgo = diffMins <= 1 ? 'Just now' : `${diffMins} minutes ago`;
+            } else if (diffHours < 24) {
+                timeAgo = `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+            } else {
+                timeAgo = `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+            }
+
+            // Format notification based on type
+            let formattedMessage = notification.message;
+            let formattedTitle = notification.title;
+
+            if (notification.notificationType === 'follow_up') {
+                // Format follow-up reminder message
+                const property = notification.propertyId || {};
+                const nextFollowUpDate = notification.metadata?.nextFollowUpDate;
+
+                formattedMessage = `This is a reminder for the upcoming follow-up regarding:\nProject: ${property.projectName || 'N/A'}\nProject ID: ${property.projectId || 'N/A'}\nNext Follow-up Date: ${nextFollowUpDate ? new Date(nextFollowUpDate).toLocaleDateString('en-IN', {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                }) : 'N/A'}`;
+            } else if (notification.notificationType === 'phone_call') {
+                formattedMessage = `Call By ${notification.source}`;
+            } else if (notification.notificationType === 'whatsapp') {
+                const leadUser = notification.leadId?.userId || {};
+                formattedMessage = `WhatsApp Message on ${leadUser.name || 'Lead'}`;
+            }
+
+            grouped[dateLabel].push({
+                _id: notification._id,
+                title: formattedTitle,
+                message: formattedMessage,
+                source: notification.source,
+                timeAgo,
+                isRead: notification.isRead,
+                notificationType: notification.notificationType,
+                metadata: notification.metadata,
+                createdAt: notification.createdAt,
+                updatedAt: notification.updatedAt
+            });
+        }
+
+        // Sort date labels: Today first, then Yesterday, then others in descending order
+        const sortedLabels = Object.keys(grouped).sort((a, b) => {
+            if (a === 'Today') return -1;
+            if (b === 'Today') return 1;
+            if (a === 'Yesterday') return -1;
+            if (b === 'Yesterday') return 1;
+            return b.localeCompare(a); // Descending for other dates
+        });
+
+        // Format final response
+        const formattedData = sortedLabels.map(label => ({
+            dateLabel: label,
+            notifications: grouped[label]
+        }));
+
+        logInfo('Notifications fetched', {
+            userId,
+            notificationCount: notifications.length,
+            groupCount: formattedData.length
+        });
+
+        res.json({
+            success: true,
+            message: 'Notifications fetched successfully',
+            data: formattedData
+        });
+
+    } catch (error) {
+        logError('Error fetching notifications', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== MARK ALL NOTIFICATIONS AS READ =====================
+// @desc    Mark all notifications as read for logged-in user
+// @route   PUT /api/admin/notifications/mark-all-read
+// @access  Private (Admin/Agent)
+exports.markAllNotificationsAsRead = async (req, res, next) => {
+    try {
+        const userId = req.user.userId;
+
+        // Get properties where user is relationshipManager or leadDistributionAgents
+        const userProperties = await Property.find({
+            $or: [
+                { relationshipManager: userId },
+                { leadDistributionAgents: userId }
+            ],
+            isStatus: true
+        }).select('_id').lean();
+
+        const propertyIds = userProperties.map(p => p._id);
+
+        // Build filter - only notifications for user's properties
+        const filter = {
+            userId,
+            isRead: false,
+            ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
+        };
+
+        // Update all unread notifications
+        const result = await Notification.updateMany(
+            filter,
+            { isRead: true }
+        );
+
+        logInfo('All notifications marked as read', {
+            userId,
+            updatedCount: result.modifiedCount
+        });
+
+        res.json({
+            success: true,
+            message: 'All notifications marked as read',
+            data: {
+                updatedCount: result.modifiedCount
+            }
+        });
+
+    } catch (error) {
+        logError('Error marking all notifications as read', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== SCHEDULE FOLLOW-UP =====================
+// @desc    Schedule or update follow-up date for a lead
+// @route   POST /api/admin/lead/:leadId/follow-up
+// @access  Private (Admin/Agent)
+exports.scheduleFollowUp = async (req, res, next) => {
+    try {
+        const { leadId } = req.params;
+        const { followUpDate, followUpTime, description } = req.body;
+        const performedBy = req.user.userId;
+        const performedByName = req.user.name || 'Admin';
+
+        // Validate lead exists
+        const lead = await leadModal.findById(leadId)
+            .populate('propertyId', 'projectName projectId')
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead) {
+            return res.status(404).json({ success: false, message: "Lead not found" });
+        }
+
+        // Parse follow-up date
+        let parsedFollowUpDate = null;
+        if (followUpDate) {
+            parsedFollowUpDate = new Date(followUpDate);
+            if (isNaN(parsedFollowUpDate.getTime())) {
+                return res.status(400).json({ success: false, message: "Invalid follow-up date format" });
+            }
+
+            // If time is provided, add it to the date
+            if (followUpTime) {
+                const [hours, minutes] = followUpTime.split(':');
+                parsedFollowUpDate.setHours(parseInt(hours) || 0, parseInt(minutes) || 0, 0, 0);
+            }
+        }
+
+        // Update lead's scheduleDate (set to null if no follow-up date provided)
+        await leadModal.findByIdAndUpdate(
+            leadId,
+            { scheduleDate: parsedFollowUpDate || null },
+            { new: true }
+        );
+
+        // Create timeline activity
+        const activityDescription = parsedFollowUpDate
+            ? `Follow up scheduled for ${parsedFollowUpDate.toLocaleDateString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            })}${description ? `. ${description}` : ''}`
+            : `Follow up cleared${description ? `. ${description}` : ''}`;
+
+        const activity = await LeadActivity.create({
+            leadId,
+            activityType: 'follow_up',
+            performedBy,
+            performedByName,
+            description: activityDescription,
+            nextFollowUpDate: parsedFollowUpDate,
+            metadata: {
+                followUpTime: followUpTime || null,
+                description: description || ''
+            }
+        });
+
+        // Create notification
+        const property = lead.propertyId || {};
+        const leadUser = lead.userId || {};
+
+        if (parsedFollowUpDate) {
+            await createNotification(
+                leadId,
+                'follow_up',
+                performedByName,
+                performedBy,
+                'Follow-up Reminder',
+                `This is a reminder for the upcoming follow-up regarding:\nProject: ${property.projectName || 'N/A'}\nProject ID: ${property.projectId || 'N/A'}\nNext Follow-up Date: ${parsedFollowUpDate.toLocaleDateString('en-IN', {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                })}`,
+                {
+                    nextFollowUpDate: parsedFollowUpDate,
+                    activityDescription: description || ''
+                }
+            );
+        }
+
+        logInfo('Follow-up scheduled', {
+            leadId,
+            followUpDate: parsedFollowUpDate,
+            performedBy
+        });
+
+        res.json({
+            success: true,
+            message: parsedFollowUpDate ? "Follow-up scheduled successfully" : "Follow-up cleared successfully",
+            data: {
+                activityId: activity._id,
+                followUpDate: parsedFollowUpDate,
+                activityDate: activity.activityDate
+            }
+        });
+
+    } catch (error) {
+        logError('Error scheduling follow-up', error, {
+            leadId: req.params.leadId,
+            performedBy: req.user?.userId
+        });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== CALL NOW =====================
+// @desc    Record a call activity for a lead
+// @route   POST /api/admin/lead/:leadId/call
+// @access  Private (Admin/Agent)
+exports.callNow = async (req, res, next) => {
+    try {
+        const { leadId } = req.params;
+        const { description } = req.body;
+        const performedBy = req.user.userId;
+        const performedByName = req.user.name || 'Admin';
+
+        // Validate lead exists
+        const lead = await leadModal.findById(leadId)
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead) {
+            return res.status(404).json({ success: false, message: "Lead not found" });
+        }
+
+        // Create timeline activity
+        const leadUser = lead.userId || {};
+        const activityDescription = `Phone call made to ${leadUser.name || 'lead'}${description ? `. ${description}` : ''}`;
+
+        const activity = await LeadActivity.create({
+            leadId,
+            activityType: 'phone_call',
+            performedBy,
+            performedByName,
+            description: activityDescription,
+            metadata: {
+                description: description || ''
+            }
+        });
+
+        // Create notification
+        await createNotification(
+            leadId,
+            'phone_call',
+            performedByName,
+            performedBy,
+            'Call Activity',
+            `Call By ${performedByName}`,
+            {
+                activityDescription: description || ''
+            }
+        );
+
+        logInfo('Call activity recorded', {
+            leadId,
+            performedBy,
+            activityId: activity._id
+        });
+
+        res.json({
+            success: true,
+            message: "Call activity recorded successfully",
+            data: {
+                activityId: activity._id,
+                activityType: activity.activityType,
+                activityDate: activity.activityDate
+            }
+        });
+
+    } catch (error) {
+        logError('Error recording call activity', error, {
+            leadId: req.params.leadId,
+            performedBy: req.user?.userId
+        });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== SEND WHATSAPP =====================
+// @desc    Record a WhatsApp message activity for a lead
+// @route   POST /api/admin/lead/:leadId/whatsapp
+// @access  Private (Admin/Agent)
+exports.sendWhatsApp = async (req, res, next) => {
+    try {
+        const { leadId } = req.params;
+        const { description } = req.body;
+        const performedBy = req.user.userId;
+        const performedByName = req.user.name || 'Admin';
+
+        // Validate lead exists
+        const lead = await leadModal.findById(leadId)
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead) {
+            return res.status(404).json({ success: false, message: "Lead not found" });
+        }
+
+        // Create timeline activity
+        const leadUser = lead.userId || {};
+        const activityDescription = `WhatsApp message sent to ${leadUser.name || 'lead'}${description ? `. ${description}` : ''}`;
+
+        const activity = await LeadActivity.create({
+            leadId,
+            activityType: 'whatsapp',
+            performedBy,
+            performedByName,
+            description: activityDescription,
+            metadata: {
+                description: description || ''
+            }
+        });
+
+        // Create notification
+        await createNotification(
+            leadId,
+            'whatsapp',
+            performedByName,
+            performedBy,
+            'WhatsApp Message',
+            `WhatsApp Message on ${leadUser.name || 'Lead'}`,
+            {
+                activityDescription: description || ''
+            }
+        );
+
+        logInfo('WhatsApp activity recorded', {
+            leadId,
+            performedBy,
+            activityId: activity._id
+        });
+
+        res.json({
+            success: true,
+            message: "WhatsApp activity recorded successfully",
+            data: {
+                activityId: activity._id,
+                activityType: activity.activityType,
+                activityDate: activity.activityDate
+            }
+        });
+
+    } catch (error) {
+        logError('Error recording WhatsApp activity', error, {
+            leadId: req.params.leadId,
+            performedBy: req.user?.userId
+        });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET CRM PROFILE =====================
+// @desc    Get CRM user profile
+// @route   GET /api/admin/crm/profile
+// @access  Private (Admin/Agent)
+exports.getCRMProfile = async (req, res, next) => {
+    try {
+        const userId = req.user.userId;
+
+        const user = await User.findById(userId)
+            .select('-password')
+            .populate('role', 'name roleName')
+            .lean();
+
+        if (!user) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        // Format response
+        const profileData = {
+            _id: user._id,
+            firstName: user.firstName || '',
+            lastName: user.lastName || '',
+            name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
+            email: user.email || '',
+            phoneNumber: user.phoneNumber || '',
+            countryCode: user.countryCode || '+91',
+            profileImage: user.profileImage || null,
+            pincode: user.pincode || '',
+            city: user.city || '',
+            state: user.state || '',
+            country: user.country || 'India',
+            role: user.role || null,
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
+        };
+
+        logInfo('CRM profile fetched', { userId });
+
+        res.json({
+            success: true,
+            message: "Profile fetched successfully",
+            data: profileData
+        });
+
+    } catch (error) {
+        logError('Error fetching CRM profile', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== UPDATE CRM PROFILE =====================
+// @desc    Update CRM user profile
+// @route   PUT /api/admin/crm/profile
+// @access  Private (Admin/Agent)
+exports.updateCRMProfile = async (req, res, next) => {
+    try {
+        const userId = req.user.userId;
+        const {
+            firstName,
+            lastName,
+            email,
+            phoneNumber,
+            countryCode,
+            pincode,
+            city,
+            state,
+            country
+        } = req.body;
+
+        // Get current user
+        const currentUser = await User.findById(userId).select('email phoneNumber').lean();
+        if (!currentUser) {
+            return res.status(404).json({ success: false, message: "User not found" });
+        }
+
+        // Prepare update data
+        const updates = {};
+
+        if (firstName) updates.firstName = firstName.trim();
+        if (lastName) updates.lastName = lastName.trim();
+        if (pincode) updates.pincode = pincode.trim();
+        if (city) updates.city = city.trim();
+        if (state) updates.state = state.trim();
+        if (country) updates.country = country.trim();
+
+        // Email update with duplicate check
+        if (email && email !== currentUser.email) {
+            const emailExists = await User.findOne({ email: email.toLowerCase().trim() });
+            if (emailExists) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Email already exists"
+                });
+            }
+            updates.email = email.toLowerCase().trim();
+        }
+
+        // Phone number update with validation
+        if (phoneNumber) {
+            const phoneRegex = /^[0-9]{10}$/;
+            if (!phoneRegex.test(phoneNumber)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Phone number must be 10 digits"
+                });
+            }
+            updates.phoneNumber = phoneNumber;
+        }
+
+        // Country code update
+        if (countryCode) {
+            updates.countryCode = countryCode.trim();
+        }
+
+        // Handle profile image upload
+        if (req.file) {
+            try {
+                const profileImage = await uploadToS3(req.file, 'users/profile');
+                updates.profileImage = profileImage;
+            } catch (uploadError) {
+                logError('Error uploading profile image', uploadError, { userId });
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to upload profile image"
+                });
+            }
+        } else if (req.body.profileImage) {
+            // If profileImage is provided as URL string
+            updates.profileImage = req.body.profileImage;
+        }
+
+        // Update user
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            updates,
+            { new: true, runValidators: true }
+        )
+            .select('-password')
+            .populate('role', 'name roleName')
+            .lean();
+
+        // Format response
+        const profileData = {
+            _id: updatedUser._id,
+            firstName: updatedUser.firstName || '',
+            lastName: updatedUser.lastName || '',
+            name: updatedUser.name || `${updatedUser.firstName || ''} ${updatedUser.lastName || ''}`.trim(),
+            email: updatedUser.email || '',
+            phoneNumber: updatedUser.phoneNumber || '',
+            countryCode: updatedUser.countryCode || '+91',
+            profileImage: updatedUser.profileImage || null,
+            pincode: updatedUser.pincode || '',
+            city: updatedUser.city || '',
+            state: updatedUser.state || '',
+            country: updatedUser.country || 'India',
+            role: updatedUser.role || null,
+            createdAt: updatedUser.createdAt,
+            updatedAt: updatedUser.updatedAt
+        };
+
+        logInfo('CRM profile updated', { userId, updatedFields: Object.keys(updates) });
+
+        res.json({
+            success: true,
+            message: "Profile updated successfully",
+            data: profileData
+        });
+
+    } catch (error) {
+        logError('Error updating CRM profile', error, { userId: req.user?.userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
