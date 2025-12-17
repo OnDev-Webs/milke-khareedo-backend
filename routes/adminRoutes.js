@@ -22,7 +22,7 @@ router.get('/get_admin_profile', authenticate, authorizeAdmin, adminController.g
 router.put('/update_admin_profile', authenticate, authorizeAdmin, upload.single('profileImage'), adminController.updateAdminProfile);
 
 // CHANGE PASSWORD
-router.post('/change_password', authenticate, authorizeAdmin ,adminController.changePassword);
+router.post('/change_password', authenticate, authorizeAdmin, adminController.changePassword);
 
 // ADMIN DASHBOARD ROUTES
 router.get('/admin_dashboard', authenticate, authorizeAdmin, adminController.getAdminDashboard);
@@ -30,8 +30,8 @@ router.get('/dashboard/recent-leads', authenticate, adminController.getRecentLea
 router.get('/leads/filter', authenticate, adminController.getFilteredLeads);
 
 // USER MANAGEMENT ROUTES
-router.get('/get_all_user', authenticate, authorizeAdmin ,adminController.getAllUsers);
-router.get('/get_all_user_by_id/:id', authenticate,authorizeAdmin, adminController.getUserById);
+router.get('/get_all_user', authenticate, authorizeAdmin, adminController.getAllUsers);
+router.get('/get_all_user_by_id/:id', authenticate, authorizeAdmin, adminController.getUserById);
 
 
 // CREATE PROPERTY ROUTES
@@ -64,6 +64,12 @@ router.delete('/delete_developer/:id', authenticate, authorizeAdmin, adminContro
 router.get('/lead_list', authenticate, adminController.getLeadsList);
 router.get('/view_lead_list/:leadId', authenticate, adminController.viewLeadDetails);
 router.delete('/delete_lead_list/:leadId', authenticate, adminController.deleteLead);
+
+// Lead Timeline/Activity Routes
+router.post('/lead/:leadId/activity', authenticate, adminController.addLeadActivity);
+router.put('/lead/:leadId/status', authenticate, adminController.updateLeadStatus);
+router.put('/lead/:leadId/remark', authenticate, adminController.updateLeadRemark);
+router.get('/lead/:leadId/timeline', authenticate, adminController.getLeadTimeline);
 
 // ROLE MANAGEMENT ROUTES
 router.get('/get_agent_role', authenticate, authorizeAdmin, adminController.getAgentRoles);
