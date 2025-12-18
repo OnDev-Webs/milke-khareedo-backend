@@ -13,7 +13,22 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 // @access  Public
 exports.register = async (req, res, next) => {
     try {
-        const { name, email, password, phone } = req.body;
+        const { firstName, lastName, email, password, phoneNumber, countryCode } = req.body;
+
+        // Validate required fields
+        if (!firstName || !lastName) {
+            return res.status(400).json({
+                success: false,
+                message: 'First name and last name are required'
+            });
+        }
+
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                message: 'Email is required'
+            });
+        }
 
         // Check if user already exists - optimize with lean() and select only email
         const existingUser = await User.findOne({ email }).select('email').lean();
@@ -25,17 +40,22 @@ exports.register = async (req, res, next) => {
             });
         }
 
-        // Validate phone
-        if (!phone || phone.length !== 10) {
+        // Validate phone number
+        if (!phoneNumber || phoneNumber.length !== 10) {
             return res.status(400).json({
                 success: false,
                 message: 'Phone number must be 10 digits'
             });
         }
 
-        // Hash password
-        const salt = await bcrypt.genSalt(10);
-        const hashedPassword = await bcrypt.hash(password, salt);
+        // Validate country code (default to +91 if not provided)
+        const finalCountryCode = countryCode || '+91';
+        if (!finalCountryCode.startsWith('+')) {
+            return res.status(400).json({
+                success: false,
+                message: 'Country code must start with + (e.g., +91)'
+            });
+        }
 
         // Get default role or create one if needed - optimize with lean()
         let defaultRole = await Role.findOne({ name: 'User' }).lean();
@@ -54,9 +74,11 @@ exports.register = async (req, res, next) => {
 
         // Create user
         const user = await User.create({
-            name,
+            firstName,
+            lastName,
             email,
-            phone,
+            phoneNumber,
+            countryCode: finalCountryCode,
             password,
             role: defaultRole._id
         });
@@ -78,9 +100,12 @@ exports.register = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
                     name: user.name,
                     email: user.email,
-                    phone: user.phone,
+                    phoneNumber: user.phoneNumber,
+                    countryCode: user.countryCode,
                     role: {
                         id: user.role._id,
                         name: user.role.name,
@@ -140,8 +165,12 @@ exports.login = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
                     name: user.name,
                     email: user.email,
+                    phoneNumber: user.phoneNumber,
+                    countryCode: user.countryCode,
                     role: user.role ? {
                         id: user.role._id,
                         name: user.role.name,
@@ -169,7 +198,11 @@ exports.googleLogin = async (req, res, next) => {
             audience: process.env.GOOGLE_CLIENT_ID
         });
         const payload = ticket.getPayload();
-        const { email, name } = payload;
+        const { email, given_name, family_name, name } = payload;
+
+        // Split name into firstName and lastName if not provided separately
+        const firstName = given_name || (name ? name.split(' ')[0] : 'User');
+        const lastName = family_name || (name ? name.split(' ').slice(1).join(' ') || '' : '');
 
         // Check if user exists - optimize query
         let user = await User.findOne({ email }).populate('role', 'name permissions');
@@ -191,8 +224,11 @@ exports.googleLogin = async (req, res, next) => {
 
             // Create new user
             user = await User.create({
-                name,
+                firstName,
+                lastName,
                 email,
+                phoneNumber: '0000000000', // Default phone number for Google login
+                countryCode: '+91', // Default country code
                 password: '',
                 role: defaultRole._id
             });
@@ -214,8 +250,12 @@ exports.googleLogin = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
                     name: user.name,
                     email: user.email,
+                    phoneNumber: user.phoneNumber,
+                    countryCode: user.countryCode,
                     role: {
                         id: user.role._id,
                         name: user.role.name,
@@ -254,14 +294,24 @@ exports.getProfile = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
                     name: user.name,
                     email: user.email,
+                    phoneNumber: user.phoneNumber,
+                    countryCode: user.countryCode,
+                    profileImage: user.profileImage,
+                    pincode: user.pincode,
+                    city: user.city,
+                    state: user.state,
+                    country: user.country,
                     role: user.role ? {
                         id: user.role._id,
                         name: user.role.name,
                         permissions: user.role.permissions
                     } : null,
-                    createdAt: user.createdAt
+                    createdAt: user.createdAt,
+                    updatedAt: user.updatedAt
                 }
             }
         });
@@ -277,32 +327,96 @@ exports.getProfile = async (req, res, next) => {
 exports.updateUser = async (req, res, next) => {
     try {
         const userId = req.user.userId;
-        const { name, email } = req.body;
+        const {
+            firstName,
+            lastName,
+            email,
+            phoneNumber,
+            countryCode,
+            pincode,
+            city,
+            state,
+            country
+        } = req.body;
         let profileImage = req.body.profileImage;
 
         if (req.file) {
-            profileImage = await uploadToS3(req.file);
+            profileImage = await uploadToS3(req.file, 'users/profile');
         }
 
         const updates = {};
-        if (name) updates.name = name;
+
+        // Update basic fields
+        if (firstName) updates.firstName = firstName;
+        if (lastName) updates.lastName = lastName;
         if (email) updates.email = email;
+        if (phoneNumber) {
+            // Validate phone number format
+            if (phoneNumber.length !== 10) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Phone number must be 10 digits'
+                });
+            }
+            updates.phoneNumber = phoneNumber;
+        }
+        if (countryCode) {
+            if (!countryCode.startsWith('+')) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Country code must start with + (e.g., +91)'
+                });
+            }
+            updates.countryCode = countryCode;
+        }
         if (profileImage) updates.profileImage = profileImage;
 
+        // Update profile fields (pincode, city, state, country)
+        if (pincode !== undefined) updates.pincode = pincode;
+        if (city !== undefined) updates.city = city;
+        if (state !== undefined) updates.state = state;
+        if (country !== undefined) updates.country = country;
+
+        // If firstName or lastName is updated, name will be auto-generated by pre-save hook
         const updatedUser = await User.findByIdAndUpdate(userId, updates, {
             new: true,
             runValidators: true
-        }).select('-password').lean();
+        }).select('-password').populate('role', 'name permissions').lean();
+
+        if (!updatedUser) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
 
         logInfo('Profile updated', { userId });
         res.status(200).json({
             success: true,
             message: "Profile updated successfully",
-            data: updatedUser
+            data: {
+                user: {
+                    id: updatedUser._id,
+                    firstName: updatedUser.firstName,
+                    lastName: updatedUser.lastName,
+                    name: updatedUser.name,
+                    email: updatedUser.email,
+                    phoneNumber: updatedUser.phoneNumber,
+                    countryCode: updatedUser.countryCode,
+                    profileImage: updatedUser.profileImage,
+                    pincode: updatedUser.pincode,
+                    city: updatedUser.city,
+                    state: updatedUser.state,
+                    country: updatedUser.country,
+                    role: updatedUser.role,
+                    createdAt: updatedUser.createdAt,
+                    updatedAt: updatedUser.updatedAt
+                }
+            }
         });
 
     } catch (error) {
-        logError('Error updating profile', error, { userId });
+        logError('Error updating profile', error, { userId: req.user.userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };

@@ -13,7 +13,7 @@ router.post('/superadmin/register', [
 ], validate, adminController.registerSuperAdmin);
 
 // ADMIN LOGIN
-router.post('/admin_login', validate, adminController.adminLogin);
+router.post('/login', validate, adminController.adminLogin);
 
 // GET PROFILE
 router.get('/get_admin_profile', authenticate, authorizeAdmin, adminController.getAdminProfile);
@@ -28,6 +28,17 @@ router.post('/change_password', authenticate, authorizeAdmin, adminController.ch
 router.get('/admin_dashboard', authenticate, authorizeAdmin, adminController.getAdminDashboard);
 router.get('/dashboard/recent-leads', authenticate, adminController.getRecentLeads);
 router.get('/leads/filter', authenticate, adminController.getFilteredLeads);
+
+// CRM DASHBOARD ROUTE
+router.get('/crm-dashboard', authenticate, adminController.getCRMDashboard);
+
+// CRM PROFILE ROUTES
+router.get('/crm/profile', authenticate, adminController.getCRMProfile);
+router.put('/crm/profile', authenticate, upload.single('profileImage'), adminController.updateCRMProfile);
+
+// NOTIFICATION ROUTES
+router.get('/notifications', authenticate, adminController.getNotifications);
+router.put('/notifications/mark-all-read', authenticate, adminController.markAllNotificationsAsRead);
 
 // USER MANAGEMENT ROUTES
 router.get('/get_all_user', authenticate, authorizeAdmin, adminController.getAllUsers);
@@ -70,6 +81,9 @@ router.post('/lead/:leadId/activity', authenticate, adminController.addLeadActiv
 router.put('/lead/:leadId/status', authenticate, adminController.updateLeadStatus);
 router.put('/lead/:leadId/remark', authenticate, adminController.updateLeadRemark);
 router.get('/lead/:leadId/timeline', authenticate, adminController.getLeadTimeline);
+router.post('/lead/:leadId/follow-up', authenticate, adminController.scheduleFollowUp);
+router.post('/lead/:leadId/call', authenticate, adminController.callNow);
+router.post('/lead/:leadId/whatsapp', authenticate, adminController.sendWhatsApp);
 
 // ROLE MANAGEMENT ROUTES
 router.get('/get_agent_role', authenticate, authorizeAdmin, adminController.getAgentRoles);

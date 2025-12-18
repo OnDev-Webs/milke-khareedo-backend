@@ -20,7 +20,7 @@ const DeveloperSchema = new mongoose.Schema({
     establishedYear: {
         type: Number
     },
-    totalProjects: {           
+    totalProjects: {
         type: Number,
         default: 0
     },

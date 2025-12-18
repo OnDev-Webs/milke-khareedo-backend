@@ -43,8 +43,27 @@ const leadSchema = new mongoose.Schema({
     },
     status: {
         type: String,
-        enum: ['pending', 'approved', 'rejected'],
-        default: 'pending'
+        enum: [
+            'lead_received',
+            'interested',
+            'no_response_dnp',
+            'unable_to_contact',
+            'call_back_scheduled',
+            'demo_discussion_ongoing',
+            'site_visit_coordination',
+            'site_visit_confirmed',
+            'commercial_negotiation',
+            'deal_closed',
+            'declined_interest',
+            'does_not_meet_requirements',
+            'pending',
+            'approved',
+            'rejected'
+        ],
+        default: 'lead_received'
+    },
+    ipAddress: {
+        type: String
     }
 }, {
     timestamps: true

@@ -4,10 +4,23 @@ const UserPropertyActivity = require('../models/userPropertyActivity');
 const UserSearchHistory = require('../models/userSearchHistory');
 const Developer = require('../models/developer');
 const LeadActivity = require('../models/leadActivity');
+const Notification = require('../models/notification');
 const User = require('../models/user');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { logInfo, logError } = require('../utils/logger');
+
+// Helper function to convert connectivity Map to object for JSON response
+const convertConnectivityToObject = (connectivity) => {
+    if (!connectivity) return {};
+    if (connectivity instanceof Map) {
+        return Object.fromEntries(connectivity);
+    }
+    if (typeof connectivity === 'object') {
+        return connectivity;
+    }
+    return {};
+};
 
 // @desc    Get top properties based on lead count with location filtering
 // @route   GET /api/home/getTopProperty
@@ -1030,13 +1043,20 @@ exports.getPropertyById = async (req, res, next) => {
             }) || [],
             // Neighborhood / Connectivity
             neighborhood: {
-                connectivity: property.connectivity || {
-                    schools: [],
-                    hospitals: [],
-                    transportation: [],
-                    restaurants: []
-                },
-                mapCoordinates: property.connectivity?.schools?.[0] || null // Can be enhanced with actual coordinates
+                connectivity: convertConnectivityToObject(property.connectivity),
+                mapCoordinates: (() => {
+                    // Get first available coordinate from any connectivity category
+                    const conn = convertConnectivityToObject(property.connectivity);
+                    if (conn) {
+                        // Try to get first coordinate from any category
+                        for (const category in conn) {
+                            if (Array.isArray(conn[category]) && conn[category].length > 0) {
+                                return conn[category][0] || null;
+                            }
+                        }
+                    }
+                    return null;
+                })()
             },
             // Developer Information
             developer: property.developer ? {
@@ -1084,6 +1104,41 @@ exports.getPropertyById = async (req, res, next) => {
 
         // Find similar projects based on budget and location
         const similarProjects = await findSimilarProjects(property, minPrice, maxPrice);
+
+        // Add to view history if user is authenticated (token present)
+        if (req.user && req.user.userId) {
+            try {
+                const userId = req.user.userId;
+                const propertyId = id;
+
+                const existing = await UserPropertyActivity.findOne({
+                    userId,
+                    propertyId,
+                    activityType: "viewed"
+                }).lean();
+
+                if (existing) {
+                    // Update lastViewedAt to show in latest
+                    await UserPropertyActivity.updateOne(
+                        { _id: existing._id },
+                        { lastViewedAt: new Date() }
+                    );
+                    logInfo('Property view updated in history', { userId, propertyId });
+                } else {
+                    // Create new view entry
+                    await UserPropertyActivity.create({
+                        userId,
+                        propertyId,
+                        activityType: "viewed",
+                        lastViewedAt: new Date()
+                    });
+                    logInfo('Property view added to history', { userId, propertyId });
+                }
+            } catch (viewError) {
+                // Log error but don't fail the request
+                logError('Error adding property to view history', viewError, { propertyId: id });
+            }
+        }
 
         logInfo('Property details fetched', { propertyId: id });
         res.json({
@@ -1502,6 +1557,63 @@ const addTimelineActivity = async (leadId, activityType, performedBy, performedB
     }
 };
 
+// Helper function to create notifications for relevant users
+const createNotification = async (leadId, notificationType, source, sourceId, title, message, metadata = {}) => {
+    try {
+        // Get lead details
+        const lead = await leadModal.findById(leadId)
+            .populate('propertyId', 'relationshipManager leadDistributionAgents projectName projectId')
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead || !lead.propertyId) {
+            return; // Skip if lead or property not found
+        }
+
+        const property = lead.propertyId;
+        const leadUser = lead.userId || {};
+
+        // Determine notification recipients (relationship manager and lead distribution agents)
+        const recipients = [];
+
+        if (property.relationshipManager) {
+            recipients.push(property.relationshipManager);
+        }
+
+        if (property.leadDistributionAgents && Array.isArray(property.leadDistributionAgents)) {
+            recipients.push(...property.leadDistributionAgents);
+        }
+
+        // Remove duplicates
+        const uniqueRecipients = [...new Set(recipients.map(r => r.toString()))];
+
+        // Create notifications for each recipient
+        const notificationPromises = uniqueRecipients.map(userId => {
+            return Notification.create({
+                userId,
+                leadId,
+                propertyId: property._id,
+                notificationType,
+                title,
+                message,
+                source,
+                sourceId,
+                metadata: {
+                    projectName: property.projectName || 'N/A',
+                    projectId: property.projectId || 'N/A',
+                    leadContactName: leadUser.name || 'N/A',
+                    ...metadata
+                }
+            });
+        });
+
+        await Promise.all(notificationPromises);
+    } catch (error) {
+        logError('Error creating notification', error, { leadId, notificationType });
+        // Don't throw - notifications are non-critical
+    }
+};
+
 // @desc    Join Group Buy for a property
 // @route   POST /api/home/join-group
 // @access  Private (authenticated)
@@ -1565,6 +1677,17 @@ exports.joinGroup = async (req, res) => {
             'join_group',
             userId,
             performedByName,
+            `${performedByName} joined the group buy for ${property.projectName}`,
+            { propertyId: propertyId.toString(), source }
+        );
+
+        // Create notification for join group
+        await createNotification(
+            lead._id,
+            'join_group',
+            performedByName,
+            userId,
+            'Join Group',
             `${performedByName} joined the group buy for ${property.projectName}`,
             { propertyId: propertyId.toString(), source }
         );
@@ -1691,6 +1814,22 @@ exports.registerVisit = async (req, res) => {
             'visit',
             userId,
             performedByName,
+            `Visit registered by ${performedByName} on ${visitDateTime}`,
+            {
+                propertyId: propertyId.toString(),
+                visitDate: parsedVisitDate,
+                visitTime,
+                source
+            }
+        );
+
+        // Create notification for visit
+        await createNotification(
+            lead._id,
+            'visit',
+            performedByName,
+            userId,
+            'Visit Activity',
             `Visit registered by ${performedByName} on ${visitDateTime}`,
             {
                 propertyId: propertyId.toString(),
