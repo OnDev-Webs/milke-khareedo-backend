@@ -10,6 +10,18 @@ const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { logInfo, logError } = require('../utils/logger');
 
+// Helper function to convert connectivity Map to object for JSON response
+const convertConnectivityToObject = (connectivity) => {
+    if (!connectivity) return {};
+    if (connectivity instanceof Map) {
+        return Object.fromEntries(connectivity);
+    }
+    if (typeof connectivity === 'object') {
+        return connectivity;
+    }
+    return {};
+};
+
 // @desc    Get top properties based on lead count with location filtering
 // @route   GET /api/home/getTopProperty
 // @access  Public
@@ -1031,13 +1043,20 @@ exports.getPropertyById = async (req, res, next) => {
             }) || [],
             // Neighborhood / Connectivity
             neighborhood: {
-                connectivity: property.connectivity || {
-                    schools: [],
-                    hospitals: [],
-                    transportation: [],
-                    restaurants: []
-                },
-                mapCoordinates: property.connectivity?.schools?.[0] || null // Can be enhanced with actual coordinates
+                connectivity: convertConnectivityToObject(property.connectivity),
+                mapCoordinates: (() => {
+                    // Get first available coordinate from any connectivity category
+                    const conn = convertConnectivityToObject(property.connectivity);
+                    if (conn) {
+                        // Try to get first coordinate from any category
+                        for (const category in conn) {
+                            if (Array.isArray(conn[category]) && conn[category].length > 0) {
+                                return conn[category][0] || null;
+                            }
+                        }
+                    }
+                    return null;
+                })()
             },
             // Developer Information
             developer: property.developer ? {

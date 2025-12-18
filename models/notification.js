@@ -62,3 +62,4 @@ notificationSchema.index({ leadId: 1 });
 notificationSchema.index({ propertyId: 1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);
+

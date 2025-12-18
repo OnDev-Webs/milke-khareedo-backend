@@ -86,10 +86,9 @@ const propertySchema = new mongoose.Schema(
         layouts: [layoutSchema],
 
         connectivity: {
-            schools: [connectivitySchema],
-            hospitals: [connectivitySchema],
-            transportation: [connectivitySchema],
-            restaurants: [connectivitySchema]
+            type: Map,
+            of: [connectivitySchema],
+            default: {}
         },
 
         relationshipManager: {

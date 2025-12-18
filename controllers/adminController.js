@@ -302,6 +302,18 @@ exports.getUserById = async (req, res, next) => {
 
 // CREATE PROPERTY SECTION
 
+// Helper function to convert connectivity Map to object for JSON response
+const convertConnectivityToObject = (connectivity) => {
+    if (!connectivity) return {};
+    if (connectivity instanceof Map) {
+        return Object.fromEntries(connectivity);
+    }
+    if (typeof connectivity === 'object') {
+        return connectivity;
+    }
+    return {};
+};
+
 // ===================== CREATE PROPERTY =====================
 exports.createProperty = async (req, res, next) => {
     let {
@@ -331,6 +343,16 @@ exports.createProperty = async (req, res, next) => {
         layouts = safeJSON(layouts, []);
         connectivity = safeJSON(connectivity, {});
         leadDistributionAgents = safeJSON(leadDistributionAgents, []);
+
+        // Convert connectivity object to Map for dynamic structure
+        let connectivityMap = new Map();
+        if (connectivity && typeof connectivity === 'object') {
+            Object.keys(connectivity).forEach(key => {
+                if (Array.isArray(connectivity[key])) {
+                    connectivityMap.set(key, connectivity[key]);
+                }
+            });
+        }
 
         // Parse numeric fields
         if (latitude) latitude = parseFloat(latitude);
@@ -490,7 +512,7 @@ exports.createProperty = async (req, res, next) => {
             highlights,
             amenities,
             layouts: uploadedLayouts,
-            connectivity,
+            connectivity: connectivityMap.size > 0 ? connectivityMap : new Map(),
             relationshipManager,
             leadDistributionAgents,
             isStatus: isStatus ?? true
@@ -640,6 +662,9 @@ exports.getAllProperties = async (req, res, next) => {
             p.images = p.images || [];
             p.layouts = p.layouts || [];
 
+            // Convert connectivity Map to object for JSON response
+            p.connectivity = convertConnectivityToObject(p.connectivity);
+
             // Map layouts with configuration info
             p.layouts = (p.layouts || []).map((layout) => {
                 const config = (p.configurations || []).find((c) => c.unitType === layout.configurationUnitType);
@@ -683,6 +708,9 @@ exports.getPropertyById = async (req, res, next) => {
 
         // Convert to plain object
         const p = property.toObject();
+
+        // Convert connectivity Map to object for JSON response
+        p.connectivity = convertConnectivityToObject(p.connectivity);
 
         p.layouts = p.layouts.map((layout) => {
             const config = p.configurations.find(
@@ -737,7 +765,19 @@ exports.updateProperty = async (req, res, next) => {
         updates.highlights = safeJSON(req.body.highlights, []);
         updates.amenities = safeJSON(req.body.amenities, []);
         updates.layouts = safeJSON(req.body.layouts, []);
-        updates.connectivity = safeJSON(req.body.connectivity, {});
+        // Handle connectivity update - convert to Map for dynamic structure
+        if (req.body.connectivity !== undefined) {
+            const connectivityData = safeJSON(req.body.connectivity, {});
+            let connectivityMap = new Map();
+            if (connectivityData && typeof connectivityData === 'object') {
+                Object.keys(connectivityData).forEach(key => {
+                    if (Array.isArray(connectivityData[key])) {
+                        connectivityMap.set(key, connectivityData[key]);
+                    }
+                });
+            }
+            updates.connectivity = connectivityMap.size > 0 ? connectivityMap : new Map();
+        }
         updates.leadDistributionAgents = safeJSON(req.body.leadDistributionAgents, []);
 
         // Calculate discount percentage if developerPrice or offerPrice is being updated

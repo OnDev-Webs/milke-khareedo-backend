@@ -20,7 +20,15 @@ const errorHandler = require('./middleware/errorHandler');
 
 // Middleware
 app.use(helmet()); // Security headers
-app.use(cors()); // Enable CORS
+
+// CORS configuration - Allow all origins
+app.use(cors({
+    origin: '*', // Allow all origins
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: false // Set to false when using origin: '*'
+}));
+
 app.use(compression()); // Compress responses for faster transfer
 app.use(morgan('dev')); // HTTP request logger
 app.use(express.json({ limit: '10mb' })); // Parse JSON bodies
