@@ -3,7 +3,7 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const validate = require('../middleware/validator');
 const { body } = require('express-validator');
-const { authenticate, authorizeAdmin, authorizeSuperAdmin } = require('../middleware/auth');
+const { authenticate, authorizeAdmin, authorizeSuperAdmin, authorizeBlogAdd, authorizeBlogEdit, authorizeBlogView, authorizeBlogDelete } = require('../middleware/auth');
 const upload = require('../utils/multer');
 
 // AUTH ROUTES
@@ -102,6 +102,19 @@ router.get('/', authenticate, authorizeAdmin, adminController.getAllAssignUsers)
 router.get('/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
 router.put('/update_user/:id', authenticate, authorizeSuperAdmin, adminController.updateAssignUser);
 router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminController.deleteAssignUser);
+
+// BLOG MANAGEMENT ROUTES (with permission checks)
+router.post('/blog', authenticate, upload.fields([
+    { name: 'bannerImage', maxCount: 1 },
+    { name: 'galleryImages', maxCount: 10 }
+]), authorizeBlogAdd, adminController.createBlog);
+router.get('/blogs', authenticate, authorizeBlogView, adminController.getAllBlogs);
+router.get('/blog/:id', authenticate, authorizeBlogView, adminController.getBlogById);
+router.put('/blog/:id', authenticate, upload.fields([
+    { name: 'bannerImage', maxCount: 1 },
+    { name: 'galleryImages', maxCount: 10 }
+]), authorizeBlogEdit, adminController.updateBlog);
+router.delete('/blog/:id', authenticate, authorizeBlogDelete, adminController.deleteBlog);
 
 module.exports = router;
 

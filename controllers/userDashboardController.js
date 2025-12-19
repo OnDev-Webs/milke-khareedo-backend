@@ -164,6 +164,41 @@ exports.registerVisit = async (req, res) => {
             });
         }
 
+        // Helper function to get IP address from request
+        const getClientIpAddress = (req) => {
+            // Check for IP in various headers (for proxies/load balancers)
+            const forwarded = req.headers['x-forwarded-for'];
+            if (forwarded) {
+                // x-forwarded-for can contain multiple IPs, take the first one
+                return forwarded.split(',')[0].trim();
+            }
+
+            // Check x-real-ip header
+            if (req.headers['x-real-ip']) {
+                return req.headers['x-real-ip'];
+            }
+
+            // Check req.ip (if express trust proxy is enabled)
+            if (req.ip) {
+                return req.ip;
+            }
+
+            // Fallback to connection remote address
+            if (req.connection && req.connection.remoteAddress) {
+                return req.connection.remoteAddress;
+            }
+
+            // Final fallback
+            if (req.socket && req.socket.remoteAddress) {
+                return req.socket.remoteAddress;
+            }
+
+            return null;
+        };
+
+        // Get IP address
+        const ipAddress = getClientIpAddress(req);
+
         // Create lead (minimal fields only)
         await leadModal.create({
             userId,
@@ -173,7 +208,8 @@ exports.registerVisit = async (req, res) => {
             rmPhone: property.relationshipManager?.phone || "",
             isStatus: true,
             source: source || "origin",
-            updatedBy: userId
+            updatedBy: userId,
+            ipAddress: ipAddress
         });
 
         res.json({

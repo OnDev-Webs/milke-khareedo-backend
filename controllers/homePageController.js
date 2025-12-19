@@ -5,6 +5,7 @@ const UserSearchHistory = require('../models/userSearchHistory');
 const Developer = require('../models/developer');
 const LeadActivity = require('../models/leadActivity');
 const Notification = require('../models/notification');
+const Blog = require('../models/blog');
 const User = require('../models/user');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
@@ -20,6 +21,38 @@ const convertConnectivityToObject = (connectivity) => {
         return connectivity;
     }
     return {};
+};
+
+// Helper function to get IP address from request
+const getClientIpAddress = (req) => {
+    // Check for IP in various headers (for proxies/load balancers)
+    const forwarded = req.headers['x-forwarded-for'];
+    if (forwarded) {
+        // x-forwarded-for can contain multiple IPs, take the first one
+        return forwarded.split(',')[0].trim();
+    }
+
+    // Check x-real-ip header
+    if (req.headers['x-real-ip']) {
+        return req.headers['x-real-ip'];
+    }
+
+    // Check req.ip (if express trust proxy is enabled)
+    if (req.ip) {
+        return req.ip;
+    }
+
+    // Fallback to connection remote address
+    if (req.connection && req.connection.remoteAddress) {
+        return req.connection.remoteAddress;
+    }
+
+    // Final fallback
+    if (req.socket && req.socket.remoteAddress) {
+        return req.socket.remoteAddress;
+    }
+
+    return null;
 };
 
 // @desc    Get top properties based on lead count with location filtering
@@ -1649,6 +1682,9 @@ exports.joinGroup = async (req, res) => {
                 propertyId
             });
         } else {
+            // Get IP address
+            const ipAddress = getClientIpAddress(req);
+
             // Create new lead
             lead = await leadModal.create({
                 userId,
@@ -1658,7 +1694,8 @@ exports.joinGroup = async (req, res) => {
                 rmPhone: property.relationshipManager?.phone || "",
                 isStatus: true,
                 source: source || "origin",
-                updatedBy: userId
+                updatedBy: userId,
+                ipAddress: ipAddress
             });
             logInfo('New lead created for join group', {
                 leadId: lead._id,
@@ -1785,6 +1822,9 @@ exports.registerVisit = async (req, res) => {
                 }
             );
         } else {
+            // Get IP address
+            const ipAddress = getClientIpAddress(req);
+
             // Create new lead
             lead = await leadModal.create({
                 userId,
@@ -1795,7 +1835,8 @@ exports.registerVisit = async (req, res) => {
                 isStatus: true,
                 source: source || "origin",
                 updatedBy: userId,
-                visitStatus: 'visited'
+                visitStatus: 'visited',
+                ipAddress: ipAddress
             });
         }
 
@@ -1970,6 +2011,9 @@ exports.contactUs = async (req, res, next) => {
                 .lean();
         }
 
+        // Get IP address
+        const ipAddress = getClientIpAddress(req);
+
         // Create lead without propertyId
         const lead = await leadModal.create({
             userId: leadUserId,
@@ -1981,7 +2025,8 @@ exports.contactUs = async (req, res, next) => {
             isStatus: true,
             source: source,
             status: 'pending',
-            visitStatus: 'not_visited'
+            visitStatus: 'not_visited',
+            ipAddress: ipAddress
         });
 
         // Add timeline activity for contact us (if RM exists, otherwise use system)
@@ -2033,6 +2078,201 @@ exports.contactUs = async (req, res, next) => {
             success: false,
             message: error.message || "Error submitting contact form"
         });
+    }
+};
+
+// ===================== BLOG SECTION =====================
+
+// ===================== GET ALL BLOGS (Homepage) =====================
+// @desc    Get all published blogs for homepage
+// @route   GET /api/home/blogs
+// @access  Public
+exports.getAllBlogs = async (req, res, next) => {
+    try {
+        const {
+            page = 1,
+            limit = 10,
+            category,
+            tag,
+            search,
+            sortBy = 'newest' // newest, oldest, views
+        } = req.query;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        // Build filter - only published blogs
+        const filter = {
+            isStatus: true,
+            isPublished: true
+        };
+
+        // Category filter
+        if (category) {
+            filter.category = { $regex: category, $options: 'i' };
+        }
+
+        // Tag filter
+        if (tag) {
+            filter.tags = { $in: [new RegExp(tag, 'i')] };
+        }
+
+        // Search filter
+        if (search) {
+            filter.$or = [
+                { title: { $regex: search, $options: 'i' } },
+                { subtitle: { $regex: search, $options: 'i' } },
+                { content: { $regex: search, $options: 'i' } },
+                { category: { $regex: search, $options: 'i' } },
+                { tags: { $in: [new RegExp(search, 'i')] } }
+            ];
+        }
+
+        // Build sort criteria
+        let sortCriteria = {};
+        if (sortBy === 'newest') {
+            sortCriteria = { createdAt: -1 };
+        } else if (sortBy === 'oldest') {
+            sortCriteria = { createdAt: 1 };
+        } else if (sortBy === 'views') {
+            sortCriteria = { views: -1 };
+        } else {
+            sortCriteria = { createdAt: -1 };
+        }
+
+        const total = await Blog.countDocuments(filter);
+
+        const blogs = await Blog.find(filter)
+            .populate('author', 'name profileImage')
+            .select('title subtitle category author authorName tags bannerImage slug views createdAt')
+            .sort(sortCriteria)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .lean();
+
+        // Format blogs for homepage
+        const formattedBlogs = blogs.map(blog => {
+            // Format date (e.g., "12 Jan, 2025")
+            const date = new Date(blog.createdAt);
+            const formattedDate = date.toLocaleDateString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric'
+            });
+
+            return {
+                _id: blog._id,
+                title: blog.title,
+                subtitle: blog.subtitle || '',
+                category: blog.category || '',
+                author: blog.authorName || blog.author?.name || 'Admin',
+                authorImage: blog.author?.profileImage || null,
+                tags: blog.tags || [],
+                bannerImage: blog.bannerImage || null,
+                slug: blog.slug,
+                date: formattedDate,
+                views: blog.views || 0,
+                createdAt: blog.createdAt
+            };
+        });
+
+        logInfo('Blogs fetched for homepage', { total, page, limit, category, tag });
+
+        res.json({
+            success: true,
+            message: 'Blogs fetched successfully',
+            data: formattedBlogs,
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
+
+    } catch (error) {
+        logError('Error fetching blogs for homepage', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET BLOG BY ID OR SLUG (Homepage) =====================
+// @desc    Get single blog by ID or slug for homepage
+// @route   GET /api/home/blog/:idOrSlug
+// @access  Public
+exports.getBlogById = async (req, res, next) => {
+    try {
+        const { idOrSlug } = req.params;
+
+        // Determine if it's an ID or slug
+        const isObjectId = mongoose.Types.ObjectId.isValid(idOrSlug);
+
+        const filter = {
+            isStatus: true,
+            isPublished: true
+        };
+
+        if (isObjectId) {
+            filter._id = idOrSlug;
+        } else {
+            filter.slug = idOrSlug;
+        }
+
+        const blog = await Blog.findOne(filter)
+            .populate('author', 'name email profileImage')
+            .lean();
+
+        if (!blog) {
+            return res.status(404).json({
+                success: false,
+                message: 'Blog not found'
+            });
+        }
+
+        // Increment views
+        await Blog.findByIdAndUpdate(blog._id, { $inc: { views: 1 } });
+
+        // Format date
+        const date = new Date(blog.createdAt);
+        const formattedDate = date.toLocaleDateString('en-IN', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric'
+        });
+
+        // Format response
+        const formattedBlog = {
+            _id: blog._id,
+            title: blog.title,
+            subtitle: blog.subtitle || '',
+            category: blog.category || '',
+            author: {
+                id: blog.author?._id || blog.author,
+                name: blog.authorName || blog.author?.name || 'Admin',
+                email: blog.author?.email || null,
+                profileImage: blog.author?.profileImage || null
+            },
+            tags: blog.tags || [],
+            bannerImage: blog.bannerImage || null,
+            galleryImages: blog.galleryImages || [],
+            content: blog.content,
+            slug: blog.slug,
+            date: formattedDate,
+            views: (blog.views || 0) + 1, // Include the increment
+            createdAt: blog.createdAt,
+            updatedAt: blog.updatedAt
+        };
+
+        logInfo('Blog fetched for homepage', { blogId: blog._id, slug: blog.slug });
+
+        res.json({
+            success: true,
+            message: 'Blog fetched successfully',
+            data: formattedBlog
+        });
+
+    } catch (error) {
+        logError('Error fetching blog for homepage', error, { idOrSlug: req.params.idOrSlug });
+        res.status(500).json({ success: false, message: error.message });
     }
 };
 
