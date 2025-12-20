@@ -114,52 +114,61 @@ exports.registerSuperAdmin = async (req, res, next) => {
 };
 // ===================== ADMIN LOGIN =====================
 // @desc    Register superadmin
-// @route   POST /api/admin/admin_login
+// @route   POST /api/admin/login
 // @access  Public
 exports.adminLogin = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user exists - optimize query
-        const user = await User.findOne({ email }).select('+password').populate('role', 'name permissions');
+        const user = await User.findOne({ email })
+            .select('+password')
+            .populate('role', 'name permissions');
 
+        // ❌ User not found
         if (!user) {
-            logInfo('Admin login attempt with invalid email', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
             });
         }
 
-        // Allowed roles for admin panel
-        const allowedRoles = ["admin", "Super Admin", "Project Manager", "CRM Manager"];
+        // ❌ Role not assigned
+        if (!user.role || !user.role.name) {
+            return res.status(403).json({
+                success: false,
+                message: "Role not assigned. Contact admin."
+            });
+        }
 
-        if (!allowedRoles.includes(user.role.name)) {
-            logInfo('Admin login attempt with unauthorized role', { email, role: user.role.name });
+        // ❌ Block only USER role
+        if (user.role.name.toLowerCase() === 'user') {
             return res.status(403).json({
                 success: false,
                 message: "You are not allowed to access admin panel"
             });
         }
 
-        // Check password
+        // ❌ Password mismatch
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
-            logInfo('Admin login attempt with invalid password', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
             });
         }
 
-        // Generate JWT token
+        // ✅ Generate JWT
         const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId: user.role._id },
+            {
+                userId: user._id,
+                email: user.email,
+                roleId: user.role._id,
+                roleName: user.role.name   
+            },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
 
-        logInfo('Admin logged in successfully', { userId: user._id, email: user.email, role: user.role.name });
         return res.json({
             success: true,
             message: "Admin login successful",
@@ -179,7 +188,6 @@ exports.adminLogin = async (req, res, next) => {
         });
 
     } catch (error) {
-        logError('Error during admin login', error);
         next(error);
     }
 };
@@ -1492,6 +1500,64 @@ exports.viewLeadDetails = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+// Helper function to create notifications for relevant users
+const createNotification = async (leadId, notificationType, source, sourceId, title, message, metadata = {}) => {
+    try {
+        // Get lead details
+        const lead = await leadModal.findById(leadId)
+            .populate('propertyId', 'relationshipManager leadDistributionAgents projectName projectId')
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead || !lead.propertyId) {
+            return; // Skip if lead or property not found
+        }
+
+        const property = lead.propertyId;
+        const leadUser = lead.userId || {};
+
+        // Determine notification recipients (relationship manager and lead distribution agents)
+        const recipients = [];
+
+        if (property.relationshipManager) {
+            recipients.push(property.relationshipManager);
+        }
+
+        if (property.leadDistributionAgents && Array.isArray(property.leadDistributionAgents)) {
+            recipients.push(...property.leadDistributionAgents);
+        }
+
+        // Remove duplicates
+        const uniqueRecipients = [...new Set(recipients.map(r => r.toString()))];
+
+        // Create notifications for each recipient
+        const notificationPromises = uniqueRecipients.map(userId => {
+            return Notification.create({
+                userId,
+                leadId,
+                propertyId: property._id,
+                notificationType,
+                title,
+                message,
+                source,
+                sourceId,
+                metadata: {
+                    projectName: property.projectName || 'N/A',
+                    projectId: property.projectId || 'N/A',
+                    leadContactName: leadUser.name || 'N/A',
+                    ...metadata
+                }
+            });
+        });
+
+        await Promise.all(notificationPromises);
+    } catch (error) {
+        logError('Error creating notification', error, { leadId, notificationType });
+        // Don't throw - notifications are non-critical
+    }
+};
+
 // ===================== ADD LEAD TIMELINE ACTIVITY =====================
 // @desc    Add activity to lead timeline (phone call, WhatsApp, follow-up, etc.)
 // @route   POST /api/admin/lead/:leadId/activity
@@ -2046,51 +2112,41 @@ exports.createUser = async (req, res) => {
     try {
         const { name, email, password, phone, role } = req.body;
 
-        // Validate email format
-        if (!email || !email.includes('@')) {
+        if (!name || !email || !password || !phone || !role) {
+            return res.status(400).json({
+                success: false,
+                message: "All fields are required"
+            });
+        }
+
+        // 🔹 Split name → firstName & lastName
+        const nameParts = name.trim().split(' ');
+        const firstName = nameParts[0];
+        const lastName = nameParts.slice(1).join(' ') || 'NA';
+
+        if (!email.includes('@')) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid email format"
             });
         }
 
-        // Block personal email providers - only allow business/domain emails
         const blockedDomains = [
-            'gmail.com',
-            'yahoo.com',
-            'hotmail.com',
-            'outlook.com',
-            'live.com',
-            'msn.com',
-            'aol.com',
-            'icloud.com',
-            'mail.com',
-            'protonmail.com',
-            'yandex.com',
-            'zoho.com',
-            'rediffmail.com',
-            'inbox.com',
-            'gmx.com'
+            'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+            'live.com', 'msn.com', 'aol.com', 'icloud.com', 'mail.com',
+            'protonmail.com', 'yandex.com', 'zoho.com', 'rediffmail.com',
+            'inbox.com', 'gmx.com'
         ];
 
         const emailDomain = email.split('@')[1]?.toLowerCase().trim();
-        if (!emailDomain) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email format"
-            });
-        }
-
-        // Check if email is from blocked personal email provider
         if (blockedDomains.includes(emailDomain)) {
             return res.status(400).json({
                 success: false,
-                message: "Personal email addresses are not allowed. Please use a business/domain email address."
+                message: "Personal email addresses are not allowed."
             });
         }
 
-        // Check existing user
-        const exists = await User.findOne({ email }).select('email').lean();
+        const exists = await User.findOne({ email: email.toLowerCase() }).lean();
         if (exists) {
             return res.status(400).json({
                 success: false,
@@ -2098,8 +2154,7 @@ exports.createUser = async (req, res) => {
             });
         }
 
-        // Check valid role
-        const roleExists = await Role.findById(role).select('_id name').lean();
+        const roleExists = await Role.findById(role).lean();
         if (!roleExists) {
             return res.status(400).json({
                 success: false,
@@ -2107,24 +2162,17 @@ exports.createUser = async (req, res) => {
             });
         }
 
-        // Create user
         const user = await User.create({
-            name,
+            firstName,
+            lastName,
             email: email.toLowerCase().trim(),
             password,
-            phone,
+            phoneNumber: phone,   
+            countryCode: '+91',   
             role
         });
 
-        // Populate role for response
         await user.populate('role', 'name permissions');
-
-        logInfo('User created by admin', {
-            userId: user._id,
-            email: user.email,
-            role: roleExists.name,
-            createdBy: req.user?.userId
-        });
 
         res.status(201).json({
             success: true,
@@ -2133,17 +2181,14 @@ exports.createUser = async (req, res) => {
                 _id: user._id,
                 name: user.name,
                 email: user.email,
-                phone: user.phone,
+                phone: user.phoneNumber,
                 role: user.role,
                 createdAt: user.createdAt
             }
         });
 
     } catch (error) {
-        logError('Error creating user', error, {
-            email: req.body.email,
-            createdBy: req.user?.userId
-        });
+        console.error(error);
         res.status(500).json({
             success: false,
             message: error.message || "Error creating user"
