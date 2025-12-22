@@ -266,13 +266,11 @@ exports.getSearchHistory = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        // Get all search history for user, sorted by most recent
         const searches = await UserSearchHistory.find({ userId })
             .sort({ updatedAt: -1, createdAt: -1 })
             .lean()
             .limit(100); // Limit to last 100 searches for performance
 
-        // Helper function to format date label (Today, Yesterday, or date)
         const getDateLabel = (date) => {
             const today = new Date();
             today.setHours(0, 0, 0, 0);

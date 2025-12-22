@@ -116,12 +116,57 @@ const verifyOTP = async (phoneNumber, countryCode, otp) => {
     return { success: true };
 };
 
+
+// Send Password via SMS
+const sendPasswordSMS = async (phoneNumber, countryCode, password, userName) => {
+    try {
+        const client = getTwilioClient();
+        if (!client) {
+            throw new Error('Twilio client not initialized');
+        }
+        const username = `${countryCode}${phoneNumber}`;
+        const formattedPhone = username;
+
+        const messageBody =
+            `Hello ${userName},\n\n` +
+            `Your account has been created successfully.\n\n` +
+            `Login credentials:\n` +
+            `Username: ${formattedPhone}\n` +
+            `Password: ${password}\n\n` +
+            `Please change your password after login.\n\n` +
+            `- Milke Khareedo Team`;
+
+        const fromNumber = process.env.TWILIO_PHONE_NUMBER;
+        if (!fromNumber) {
+            throw new Error('TWILIO_PHONE_NUMBER not found');
+        }
+
+        const message = await client.messages.create({
+            body: messageBody,
+            from: fromNumber,
+            to: formattedPhone
+        });
+
+        logInfo('Password SMS sent successfully', {
+            phoneNumber: formattedPhone,
+            messageSid: message.sid
+        });
+
+        return { success: true };
+
+    } catch (error) {
+        logError('Error sending password SMS', error);
+        return { success: false, error: error.message };
+    }
+};
+
 module.exports = {
     initializeTwilio,
     getTwilioClient,
     generateOTP,
     sendOTP,
-    verifyOTP
+    verifyOTP,
+    sendPasswordSMS
 };
 
 

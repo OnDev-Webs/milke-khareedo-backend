@@ -22,8 +22,6 @@ router.post('/property/visit', authenticate, homePageController.registerVisit);
 // Join Group Buy
 router.post('/join-group', authenticate, homePageController.joinGroup);
 
-// router.post('/search', optionalAuthenticate, homePageController.addSearchHistory);
-
 // Property Comparison
 router.post('/compare', homePageController.compareProperties);
 

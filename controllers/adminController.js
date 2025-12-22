@@ -12,6 +12,7 @@ const Notification = require("../models/notification");
 const Blog = require("../models/blog");
 const { uploadToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
+const { sendPasswordSMS } = require("../utils/twilio");
 
 // AUTH SECTION
 
@@ -1079,6 +1080,7 @@ exports.updateProperty = async (req, res, next) => {
         next(error);
     }
 };
+
 // ===================== DELETE PROPERTY =====================
 exports.deleteProperty = async (req, res, next) => {
     try {
@@ -1269,137 +1271,105 @@ exports.deleteDeveloper = async (req, res, next) => {
 exports.getLeadsList = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { dateRange, page = 1, limit = 10 } = req.query;
-
-        // Get properties where user is relationshipManager or leadDistributionAgents
-        const userProperties = await Property.find({
-            $or: [
-                { relationshipManager: userId },
-                { leadDistributionAgents: userId }
-            ],
-            isStatus: true
-        }).select('_id').lean();
-
-        const propertyIds = userProperties.map(p => p._id);
-
-        // Build filter
+        const role = req.user.roleName?.toLowerCase();
+        const { page = 1, limit = 10 } = req.query;
         let filter = { isStatus: true };
 
-        // Filter by user's properties
-        if (propertyIds.length > 0) {
-            filter.propertyId = { $in: propertyIds };
-        } else {
-            // If no properties, return empty results
-            return res.json({
-                success: true,
-                message: "Lead list fetched successfully",
-                data: [],
-                pagination: { total: 0, page: parseInt(page), limit: parseInt(limit), totalPages: 0 }
-            });
+        if (role !== 'admin' && role !== 'super admin') {
+            const properties = await Property.find({
+                isStatus: true,
+                $or: [
+                    { relationshipManager: userId },
+                    { leadDistributionAgents: userId }
+                ]
+            }).select('_id').lean();
+
+            const propertyIds = properties.map(p => p._id);
+
+            if (role === 'project manager') {
+                filter.$or = [
+                    { propertyId: { $in: propertyIds } },
+                    { relationshipManagerId: userId }
+                ];
+            }
+
+            if (role === 'agent') {
+                if (!propertyIds.length) {
+                    return res.json({
+                        success: true,
+                        message: "Lead list fetched successfully",
+                        data: [],
+                        pagination: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }
+                    });
+                }
+                filter.propertyId = { $in: propertyIds };
+            }
         }
 
-        // Date range filter
-        if (dateRange === 'last_month') {
-            const now = new Date();
-            const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            filter.createdAt = { $gte: lastMonth };
-        }
-
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const skip = (page - 1) * limit;
         const total = await leadModal.countDocuments(filter);
 
         const leads = await leadModal.find(filter)
             .populate({
                 path: "propertyId",
-                select: "projectName projectId name location relationshipManager",
-                populate: { path: "relationshipManager", select: "name" }
+                select: "projectName projectId name location configurations images developerPrice offerPrice discountPercentage possessionDate minGroupMembers",
             })
             .populate("userId", "name email phoneNumber countryCode profileImage")
             .populate("relationshipManagerId", "name email phone")
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(Number(limit))
             .lean();
 
-        // Format status for display
-        const formatStatus = (status) => {
-            const statusMap = {
-                'lead_received': 'Lead Received',
-                'interested': 'Interested',
-                'no_response_dnp': 'No Response - Do Not Pick (DNP)',
-                'unable_to_contact': 'Unable to Contact',
-                'call_back_scheduled': 'Call Back Scheduled',
-                'demo_discussion_ongoing': 'Demo Discussion Ongoing',
-                'site_visit_coordination': 'Site Visit Coordination in Progress',
-                'site_visit_confirmed': 'Site Visit Confirmed',
-                'commercial_negotiation': 'Commercial Negotiation',
-                'deal_closed': 'Deal Closed',
-                'declined_interest': 'Declined Interest',
-                'does_not_meet_requirements': 'Does Not Meet Requirements',
-                'pending': 'Pending',
-                'approved': 'Approved',
-                'rejected': 'Rejected'
-            };
-            return statusMap[status] || status;
-        };
-
-        // Format date (e.g., "2 June, 2025, 02:23 AM")
-        const formatDate = (date) => {
-            const d = new Date(date);
-            const day = d.getDate();
-            const month = d.toLocaleDateString('en-IN', { month: 'long' });
-            const year = d.getFullYear();
-            const time = d.toLocaleTimeString('en-IN', {
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: true
-            });
-            return `${day} ${month}, ${year}, ${time}`;
-        };
-
-        // Format phone number
-        const formatPhone = (user) => {
-            if (!user || !user.phoneNumber) return 'N/A';
-            const countryCode = user.countryCode || '+91';
-            const phoneDigits = user.phoneNumber.replace(/\s/g, '');
-            if (phoneDigits.length === 10) {
-                return `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
-            }
-            return `${countryCode} ${user.phoneNumber}`;
-        };
 
         const formattedData = leads.map(item => {
             const user = item.userId || {};
             const property = item.propertyId || {};
+            const formatDateTime = (date) => {
+                if (!date) return null;
+                const d = new Date(date);
+                const day = d.getDate();
+                const month = d.toLocaleDateString('en-IN', { month: 'long' });
+                const year = d.getFullYear();
+                const time = d.toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                return `${day} ${month}, ${year}, ${time}`;
+            };
+
+            const formatPhone = (user) => {
+                if (!user.phoneNumber) return 'N/A';
+                const countryCode = user.countryCode || '+91';
+                const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+                return phoneDigits.length === 10
+                    ? `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`
+                    : `${countryCode} ${user.phoneNumber}`;
+            };
 
             return {
                 _id: item._id,
-                leadName: user.name || 'N/A',
+                userName: user.name || 'N/A',
+                email: user.email || 'N/A',
                 phoneNumber: formatPhone(user),
-                profileImage: user.profileImage || null,
                 projectId: property.projectId || 'N/A',
-                projectName: property.projectName || property.name || 'N/A (Contact Us)',
-                location: property.location || 'N/A',
-                source: item.source || 'origin',
-                status: formatStatus(item.status || 'lead_received'),
-                statusValue: item.status || 'lead_received',
-                date: formatDate(item.createdAt || item.date),
+                status: item.status || 'lead_received',
+                dateTime: formatDateTime(item.createdAt),
                 createdAt: item.createdAt,
                 updatedAt: item.updatedAt
             };
         });
 
-        logInfo('Lead list fetched', { userId, total, page, limit });
-
         res.json({
             success: true,
             message: "Lead list fetched successfully",
             data: formattedData,
-            pagination: { total, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(total / parseInt(limit)) }
+            pagination: { total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
         });
 
     } catch (error) {
-        logError('Error fetching lead list', error, { userId: req.user?.userId });
+        console.error(error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -1435,13 +1405,11 @@ exports.viewLeadDetails = async (req, res) => {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Get timeline activities for this lead
         const timelineActivities = await LeadActivity.find({ leadId: lead._id })
             .populate('performedBy', 'name email phoneNumber countryCode profileImage')
             .sort({ activityDate: -1 })
             .lean();
 
-        // Format timeline activities with proper descriptions
         const formatTimelineDescription = (activity) => {
             const performer = activity.performedBy || {};
             const performerName = activity.performedByName || performer.name || 'Admin';
@@ -1505,8 +1473,6 @@ exports.viewLeadDetails = async (req, res) => {
         };
 
         const formattedTimeline = timelineActivities.map(formatTimelineDescription);
-
-        // Get next follow-up date (if any) - check both scheduleDate and activities
         let nextFollowUp = null;
         if (lead.scheduleDate) {
             const scheduleDate = new Date(lead.scheduleDate);
@@ -1542,7 +1508,6 @@ exports.viewLeadDetails = async (req, res) => {
             }
         }
 
-        // Format property details (null if contact us lead)
         const property = lead.propertyId || null;
         const propertyDetails = property ? {
             id: property._id,
@@ -1558,7 +1523,6 @@ exports.viewLeadDetails = async (req, res) => {
             relationshipManager: property.relationshipManager || null
         } : null;
 
-        // Format user details
         const user = lead.userId || {};
         const formatPhone = (user) => {
             if (!user || !user.phoneNumber) return 'N/A';
@@ -1570,7 +1534,6 @@ exports.viewLeadDetails = async (req, res) => {
             return `${countryCode} ${user.phoneNumber}`;
         };
 
-        // Format date (e.g., "2 June, 2025, 02:23 AM")
         const formatDate = (date) => {
             const d = new Date(date);
             const day = d.getDate();
@@ -1592,7 +1555,6 @@ exports.viewLeadDetails = async (req, res) => {
             profileImage: user.profileImage || null
         };
 
-        // Format status
         const formatStatus = (status) => {
             const statusMap = {
                 'lead_received': 'Lead Received',
@@ -1649,20 +1611,18 @@ exports.viewLeadDetails = async (req, res) => {
 // Helper function to create notifications for relevant users
 const createNotification = async (leadId, notificationType, source, sourceId, title, message, metadata = {}) => {
     try {
-        // Get lead details
         const lead = await leadModal.findById(leadId)
             .populate('propertyId', 'relationshipManager leadDistributionAgents projectName projectId')
             .populate('userId', 'name')
             .lean();
 
         if (!lead || !lead.propertyId) {
-            return; // Skip if lead or property not found
+            return;
         }
 
         const property = lead.propertyId;
         const leadUser = lead.userId || {};
 
-        // Determine notification recipients (relationship manager and lead distribution agents)
         const recipients = [];
 
         if (property.relationshipManager) {
@@ -1673,10 +1633,8 @@ const createNotification = async (leadId, notificationType, source, sourceId, ti
             recipients.push(...property.leadDistributionAgents);
         }
 
-        // Remove duplicates
         const uniqueRecipients = [...new Set(recipients.map(r => r.toString()))];
 
-        // Create notifications for each recipient
         const notificationPromises = uniqueRecipients.map(userId => {
             return Notification.create({
                 userId,
@@ -1699,7 +1657,6 @@ const createNotification = async (leadId, notificationType, source, sourceId, ti
         await Promise.all(notificationPromises);
     } catch (error) {
         logError('Error creating notification', error, { leadId, notificationType });
-        // Don't throw - notifications are non-critical
     }
 };
 
@@ -1714,7 +1671,6 @@ exports.addLeadActivity = async (req, res) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId).populate('userId', 'name').select('_id userId propertyId').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
@@ -2264,7 +2220,6 @@ exports.createUser = async (req, res) => {
             });
         }
 
-        // 🔹 Split name → firstName & lastName
         const nameParts = name.trim().split(' ');
         const firstName = nameParts[0];
         const lastName = nameParts.slice(1).join(' ') || 'NA';
@@ -2317,14 +2272,25 @@ exports.createUser = async (req, res) => {
             role
         });
 
+        const smsResult = await sendPasswordSMS(
+            phone,
+            '+91',
+            password,
+            `${user.firstName} ${user.lastName}`
+        );
+
+        if (!smsResult.success) {
+            console.error('❌ SMS failed:', smsResult.error);
+        }
+
         await user.populate('role', 'name permissions');
 
-        res.status(201).json({
+        return res.status(201).json({
             success: true,
-            message: "User created successfully",
+            message: "User created successfully & password sent via SMS",
             data: {
                 _id: user._id,
-                name: user.name,
+                name: `${user.firstName} ${user.lastName}`,
                 email: user.email,
                 phone: user.phoneNumber,
                 role: user.role,
@@ -2333,8 +2299,8 @@ exports.createUser = async (req, res) => {
         });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({
+        console.error('Create user error:', error);
+        return res.status(500).json({
             success: false,
             message: error.message || "Error creating user"
         });
@@ -2379,9 +2345,7 @@ exports.updateAssignUser = async (req, res) => {
     try {
         const { name, email, phone, role } = req.body;
 
-        // Domain email validation if email is being updated
         if (email) {
-            // Validate email format
             if (!email.includes('@')) {
                 return res.status(400).json({
                     success: false,
@@ -2389,7 +2353,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Block personal email providers - only allow business/domain emails
             const blockedDomains = [
                 'gmail.com',
                 'yahoo.com',
@@ -2416,7 +2379,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Check if email is from blocked personal email provider
             if (blockedDomains.includes(emailDomain)) {
                 return res.status(400).json({
                     success: false,
@@ -2424,7 +2386,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Check if email already exists (excluding current user)
             const existingUser = await User.findOne({
                 email: email.toLowerCase().trim(),
                 _id: { $ne: req.params.id }
@@ -2438,7 +2399,6 @@ exports.updateAssignUser = async (req, res) => {
             }
         }
 
-        // check role if provided
         if (role) {
             const roleExists = await Role.findById(role).select('_id name').lean();
             if (!roleExists) {
@@ -2449,7 +2409,6 @@ exports.updateAssignUser = async (req, res) => {
             }
         }
 
-        // Prepare update object
         const updates = {};
         if (name) updates.name = name;
         if (email) updates.email = email.toLowerCase().trim();
@@ -2514,12 +2473,10 @@ exports.deleteAssignUser = async (req, res) => {
 // ADMIN DASHBOARD SECTION 
 exports.getAdminDashboard = async (req, res, next) => {
     try {
-        // Get current month start and end dates for bookings
         const now = new Date();
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-        // Dashboard Overview Cards - Run in parallel for better performance
         const [
             totalDevelopers,
             liveProjects,
@@ -2536,7 +2493,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             })
         ]);
 
-        // Recent Leads (last 5-10 leads)
         const recentLeads = await leadModal.find({ isStatus: true })
             .populate({
                 path: 'userId',
@@ -2550,12 +2506,10 @@ exports.getAdminDashboard = async (req, res, next) => {
             .limit(10)
             .lean();
 
-        // Format recent leads
         const formattedRecentLeads = recentLeads.map(lead => {
             const property = lead.propertyId || {};
             const user = lead.userId || {};
 
-            // Get property price (use developerPrice or offerPrice)
             const priceStr = property.developerPrice || property.offerPrice || '0';
             let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
             const priceStrLower = priceStr.toLowerCase();
@@ -2588,7 +2542,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             };
         });
 
-        // Top Performing Projects (based on lead count)
         const topProjects = await leadModal.aggregate([
             { $match: { isStatus: true } },
             {
@@ -2628,7 +2581,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             }
         ]);
 
-        // Format top projects
         const formattedTopProjects = topProjects.map(project => ({
             id: project._id,
             projectName: project.projectName || 'N/A',
@@ -2638,7 +2590,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             newLeadsFormatted: `${project.newLeads || 0} New Leads`
         }));
 
-        // Sales Team Performance (Users with Agent or Project Manager role)
         const agentRole = await Role.findOne({ name: 'Agent' }).select('_id').lean();
         const projectManagerRole = await Role.findOne({ name: 'Project Manager' }).select('_id').lean();
 
@@ -2652,9 +2603,7 @@ exports.getAdminDashboard = async (req, res, next) => {
             .limit(10)
             .lean();
 
-        // Get lead stats for each sales team member
         const salesTeamPerformance = await Promise.all(salesTeamMembers.map(async (member) => {
-            // Get leads assigned to this member (as relationshipManager or leadDistributionAgent)
             const totalLeads = await leadModal.countDocuments({
                 $or: [
                     { relationshipManagerId: member._id },
@@ -2663,7 +2612,6 @@ exports.getAdminDashboard = async (req, res, next) => {
                 isStatus: true
             });
 
-            // Get contacted leads (leads with visitStatus 'visited' or 'follow_up')
             const contactedLeads = await leadModal.countDocuments({
                 $or: [
                     { relationshipManagerId: member._id },
@@ -2673,14 +2621,11 @@ exports.getAdminDashboard = async (req, res, next) => {
                 visitStatus: { $in: ['visited', 'follow_up'] }
             });
 
-            // Calculate lead contacted percentage
             const leadContactedPercentage = totalLeads > 0
                 ? Math.round((contactedLeads / totalLeads) * 100)
                 : 0;
 
-            // Calculate average response time (simplified - using lead creation to first contact)
-            // For now, we'll use a default or calculate from lead dates
-            const responseTime = '6H'; // Can be enhanced with actual calculation
+            const responseTime = '6H';
 
             return {
                 userId: member._id,
@@ -2693,9 +2638,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             };
         }));
 
-        // Group-Buy Progress
-        // Target Units: Total configurations across all properties
-        // Confirmed Units: Configurations with availabilityStatus 'Sold' or 'Reserved'
         const allProperties = await Property.find({ isStatus: true })
             .select('configurations')
             .lean();
@@ -2725,20 +2667,15 @@ exports.getAdminDashboard = async (req, res, next) => {
             success: true,
             message: 'Admin dashboard data fetched successfully',
             data: {
-                // Overview Cards
                 overview: {
                     totalDevelopers,
                     liveProjects,
                     totalLeads,
                     totalBookingsThisMonth
                 },
-                // Recent Leads
                 recentLeads: formattedRecentLeads,
-                // Top Performing Projects
                 topPerformingProjects: formattedTopProjects,
-                // Sales Team Performance
                 salesTeamPerformance: salesTeamPerformance,
-                // Group-Buy Progress
                 groupBuyProgress: {
                     targetUnits,
                     confirmedUnits,

@@ -422,34 +422,26 @@ exports.searchProperties = async (req, res, next) => {
             bhk,
             propertyType,
             projectStatus,
-            sortBy = 'leadCount' // leadCount, newAdded, priceLow, priceHigh
+            sortBy = 'leadCount'
         } = req.query;
 
         page = parseInt(page);
         limit = parseInt(limit);
         const skip = (page - 1) * limit;
 
-        // Build search filter
         const propertyFilter = { isStatus: true };
         const searchConditions = [];
 
-        // City filter - search in location field
         if (city) {
             propertyFilter.location = { $regex: city, $options: "i" };
         }
 
-        // Search text filter - search in project name, location, or developer name
         if (searchText) {
             const searchRegex = { $regex: searchText, $options: "i" };
-
-            // Search in project name
             searchConditions.push({ projectName: searchRegex });
-
-            // Search in location (more specific than city)
             searchConditions.push({ location: searchRegex });
         }
 
-        // Get all matching developers if searchText is provided
         let matchingDeveloperIds = [];
         if (searchText) {
             const matchingDevelopers = await Developer.find({
@@ -462,12 +454,10 @@ exports.searchProperties = async (req, res, next) => {
             }
         }
 
-        // Combine search conditions with OR logic
         if (searchConditions.length > 0) {
             propertyFilter.$or = searchConditions;
         }
 
-        // Price range filter
         if (priceMin || priceMax) {
             // We'll filter by price after getting properties with calculated prices
             // Store price filters for later use
@@ -486,7 +476,6 @@ exports.searchProperties = async (req, res, next) => {
             propertyFilter.$or.push({ "configurations.unitType": typeRegex });
         }
 
-        // Project status filter (Pre Launch, Ready To Move, Under Construction)
         if (projectStatus) {
             if (projectStatus === 'Pre Launch') {
                 propertyFilter.possessionStatus = 'Under Construction';
@@ -495,7 +484,6 @@ exports.searchProperties = async (req, res, next) => {
             }
         }
 
-        // Get properties with lead counts
         const propertiesWithLeads = await leadModal.aggregate([
             { $match: { isStatus: true } },
             {
@@ -524,7 +512,6 @@ exports.searchProperties = async (req, res, next) => {
             { $replaceRoot: { newRoot: "$property" } }
         ]);
 
-        // Get properties without leads that match filters
         const propertiesWithoutLeads = await Property.find({
             ...propertyFilter,
             _id: { $nin: propertiesWithLeads.map(p => p._id) }
@@ -532,13 +519,11 @@ exports.searchProperties = async (req, res, next) => {
             .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer reraId description relationshipManager possessionDate projectSize')
             .lean();
 
-        // Combine and add leadCount = 0 for properties without leads
         let allProperties = [
             ...propertiesWithLeads,
             ...propertiesWithoutLeads.map(prop => ({ ...prop, leadCount: 0, lastLeadDate: null, createdAt: prop.createdAt || new Date() }))
         ];
 
-        // Helper function to parse price string to number
         const parsePriceToNumber = (priceStr) => {
             if (!priceStr) return 0;
             let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
@@ -787,27 +772,19 @@ exports.searchProperties = async (req, res, next) => {
                     message: discountPercentageValue > 0 ? `Get upto ${discountPercentageValue}% discount on this property` : null,
                     displayText: `Up to ${formatPrice(discountAmount)}`
                 } : null,
-                // Offer Price and Discount Percentage
                 offerPrice: property.offerPrice || null,
                 discountPercentage: property.discountPercentage || "00.00%",
-                // Configurations
                 configurations: unitTypes,
                 configurationsFormatted: unitTypes.join(', '),
-                // Possession status
                 possessionStatus: property.possessionStatus || 'N/A',
-                // Developer
                 developer: developerInfo?.developerName || 'N/A',
-                // Lead count (for ranking)
                 leadCount: leadCount,
-                // Additional info for UI
                 reraId: property.reraId,
                 description: property.description,
-                // Relationship Manager for call button
                 relationshipManager: property.relationshipManager || null
             };
         });
 
-        // Save search history if user is logged in
         const userId = req.user?.userId;
         let searchHistoryData = null;
 
@@ -815,9 +792,8 @@ exports.searchProperties = async (req, res, next) => {
             try {
                 const trimmedSearchQuery = searchText?.trim() || '';
                 const trimmedLocation = city?.trim() || '';
-                const trimmedProjectName = null; // Not available in search-properties API
+                const trimmedProjectName = null; 
 
-                // Check for duplicate search
                 const existingSearch = await UserSearchHistory.findOne({
                     userId,
                     searchQuery: trimmedSearchQuery,
@@ -916,12 +892,9 @@ exports.searchProperties = async (req, res, next) => {
 // @access  Public
 exports.getLocations = async (req, res, next) => {
     try {
-        // Get all unique locations with property counts
         const locations = await Property.aggregate([
-            // Match only active properties
             { $match: { isStatus: true } },
 
-            // Group by location to count properties
             {
                 $group: {
                     _id: "$location",
@@ -929,10 +902,8 @@ exports.getLocations = async (req, res, next) => {
                 }
             },
 
-            // Sort by property count (descending) - most properties first
             { $sort: { propertyCount: -1 } },
 
-            // Format output
             {
                 $project: {
                     _id: 0,
@@ -942,7 +913,6 @@ exports.getLocations = async (req, res, next) => {
             }
         ]);
 
-        // Extract just the location names (without duplicates)
         const uniqueLocations = locations.map(item => item.location).filter(Boolean);
 
         logInfo('Locations list fetched', {
@@ -1311,7 +1281,6 @@ exports.getPropertyById = async (req, res, next) => {
 // Helper function to get Group Buy details
 const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
     try {
-        // Get all leads for this property (active leads only)
         const groupLeads = await leadModal.find({
             propertyId: propertyId,
             isStatus: true
@@ -1327,7 +1296,6 @@ const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
             .sort({ createdAt: -1 })
             .lean();
 
-        // Get unique users (one entry per user, latest lead)
         const uniqueUsers = new Map();
         groupLeads.forEach(lead => {
             const userId = lead.userId?._id?.toString();
@@ -1336,13 +1304,10 @@ const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
             }
         });
 
-        // Format group members
         const groupMembers = Array.from(uniqueUsers.values()).map(lead => {
             const user = lead.userId || {};
             const property = lead.propertyId || {};
 
-            // Get property type interest (BHK type) - can be from lead message or property configurations
-            // For now, we'll get the first available configuration type
             const propertyTypeInterest = property.configurations?.[0]?.unitType || 'N/A';
 
             return {
@@ -1356,15 +1321,12 @@ const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
             };
         });
 
-        // Current group members count
         const currentGroupMembersCount = groupMembers.length;
 
-        // Calculate progress percentage
         const progressPercentage = minGroupMembers > 0
             ? Math.min(100, Math.round((currentGroupMembersCount / minGroupMembers) * 100))
             : 0;
 
-        // Check if minimum requirement is met
         const isMinimumMet = currentGroupMembersCount >= minGroupMembers;
 
         return {
@@ -1381,7 +1343,6 @@ const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
 
     } catch (error) {
         logError('Error fetching group buy details', error, { propertyId });
-        // Return default structure on error
         return {
             minGroupMembers: minGroupMembers || 0,
             currentGroupMembersCount: 0,
@@ -1397,27 +1358,22 @@ const getGroupBuyDetails = async (propertyId, minGroupMembers) => {
 // Helper function to find similar projects
 const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
     try {
-        // Calculate price range for similarity (±30% of current property price range for nearby budget)
         const avgPrice = (minPrice + maxPrice) / 2;
-        const priceTolerance = avgPrice * 0.3; // 30% tolerance for nearby budget
+        const priceTolerance = avgPrice * 0.3; 
 
         const nearbyMinPrice = Math.max(0, avgPrice - priceTolerance);
         const nearbyMaxPrice = avgPrice + priceTolerance;
 
-        // Extract location components for better matching
         const currentLocation = currentProperty.location.toLowerCase().trim();
         const locationParts = currentLocation.split(',').map(part => part.trim()).filter(Boolean);
 
-        // Get area (first part), city (second part), state (third part if exists)
         const currentArea = locationParts[0] || '';
         const currentCity = locationParts[1] || locationParts[0] || '';
         const currentState = locationParts[2] || '';
 
-        // Find similar properties - only active and available properties
         const allProperties = await Property.find({
             _id: { $ne: currentProperty._id },
             isStatus: true,
-            // Filter for properties with available configurations (check subConfigurations)
             $or: [
                 { 'configurations.subConfigurations.availabilityStatus': { $in: ['Available', 'Ready'] } },
                 { 'configurations.availabilityStatus': { $in: ['Available', 'Ready'] } } // Legacy support
@@ -1427,14 +1383,11 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
             .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus possessionDate developer')
             .lean();
 
-        // Score and filter similar properties based on nearby budget and nearby location
         const scoredProperties = allProperties.map(prop => {
             let score = 0;
             let budgetMatch = false;
             let locationMatch = false;
 
-            // Calculate property prices
-            // Helper to parse price (handles both number and string)
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -1456,27 +1409,22 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
 
             // Nearby Budget Matching (50% weight)
             if (propAvgPrice > 0) {
-                // Check if property price is within nearby budget range
                 if (propAvgPrice >= nearbyMinPrice && propAvgPrice <= nearbyMaxPrice) {
                     score += 50;
                     budgetMatch = true;
                 } else {
-                    // Calculate how close the price is (within 50% range)
                     const priceDiff = Math.abs(propAvgPrice - avgPrice);
                     const priceDiffPercent = avgPrice > 0 ? (priceDiff / avgPrice) : 1;
 
                     if (priceDiffPercent <= 0.5) {
-                        // Within 50% range - give partial score
                         score += 50 * (1 - priceDiffPercent);
                         budgetMatch = true;
                     } else if (priceDiffPercent <= 0.7) {
-                        // Within 70% range - give lower score
                         score += 25 * (1 - priceDiffPercent / 0.7);
                     }
                 }
             }
 
-            // Nearby Location Matching (50% weight)
             const propLocation = prop.location.toLowerCase().trim();
             const propLocationParts = propLocation.split(',').map(part => part.trim()).filter(Boolean);
             const propArea = propLocationParts[0] || '';
@@ -2387,90 +2335,6 @@ exports.getBlogById = async (req, res, next) => {
     } catch (error) {
         logError('Error fetching blog for homepage', error, { idOrSlug: req.params.idOrSlug });
         res.status(500).json({ success: false, message: error.message });
-    }
-};
-
-exports.addSearchHistory = async (req, res, next) => {
-    try {
-        const userId = req.user?.userId;
-        const { searchQuery, location, developer, projectName } = req.body;
-
-        const trimmedSearchQuery = searchQuery?.trim();
-        const trimmedProjectName = projectName?.trim();
-        const trimmedLocation = location?.trim();
-
-        let searchData = null;
-
-        if (userId) {
-            // Duplicate check
-            const existing = await UserSearchHistory.findOne({
-                userId,
-                searchQuery: trimmedSearchQuery,
-                projectName: trimmedProjectName,
-                ...(trimmedLocation ? { location: trimmedLocation } : {}),
-                ...(developer ? { developer: new mongoose.Types.ObjectId(developer) } : {})
-            });
-
-            if (existing) {
-                searchData = existing;
-            } else {
-                // Save new search
-                searchData = await UserSearchHistory.create({
-                    userId,
-                    searchQuery: trimmedSearchQuery,
-                    location: trimmedLocation,
-                    developer,
-                    projectName: trimmedProjectName
-                });
-            }
-        }
-
-        const topProperties = await UserPropertyActivity.aggregate([
-            { $match: { activityType: "visited" } },
-            {
-                $lookup: {
-                    from: "properties",
-                    localField: "propertyId",
-                    foreignField: "_id",
-                    as: "property"
-                }
-            },
-            { $unwind: "$property" },
-            {
-                $match: {
-                    ...(trimmedSearchQuery || trimmedProjectName
-                        ? { "property.projectName": { $regex: trimmedSearchQuery || trimmedProjectName, $options: "i" } }
-                        : {}),
-                    ...(trimmedLocation ? { "property.location": trimmedLocation } : {}),
-                    ...(developer ? { "property.developer": new mongoose.Types.ObjectId(developer) } : {})
-                }
-            },
-            {
-                $group: {
-                    _id: "$propertyId",
-                    visitCount: { $sum: 1 },
-                    lastVisitedAt: { $max: "$visitedAt" },
-                    property: { $first: "$property" }
-                }
-            },
-            { $sort: { visitCount: -1, lastVisitedAt: -1 } }
-        ]);
-
-        logInfo('Search history added', {
-            userId,
-            hasSearchData: !!searchData,
-            topPropertiesCount: topProperties.length
-        });
-        res.json({
-            success: true,
-            message: userId ? "Search added successfully" : "Search executed successfully",
-            searchData,
-            topProperties
-        });
-
-    } catch (error) {
-        logError('Error adding search history', error, { userId });
-        next(error);
     }
 };
 
