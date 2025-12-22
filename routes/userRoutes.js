@@ -7,11 +7,6 @@ const { body } = require('express-validator');
 const upload = require('../utils/multer');
 
 // Validation rules
-const registerValidation = [
-    body('name').trim().notEmpty().withMessage('Name is required'),
-    body('email').isEmail().withMessage('Please provide a valid email'),
-    body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
-];
 
 const loginValidation = [
     body('email').isEmail().withMessage('Please provide a valid email'),
@@ -19,10 +14,16 @@ const loginValidation = [
 ];
 
 // Routes
-router.post('/register', registerValidation, validate, userController.register);
+router.post('/register', validate, userController.register);
 router.post('/login', loginValidation, validate, userController.login);
 router.post('/social-login/google', userController.googleLogin);
 router.get('/profile', authenticate, userController.getProfile);
+
+// OTP Routes
+router.post('/verify-otp', userController.verifyOTP);
+router.post('/resend-otp', userController.resendOTP);
+router.post('/forgot-password', userController.forgotPassword);
+router.post('/reset-password', userController.resetPassword);
 
 router.put('/:id', authenticate, upload.single('profileImage'), userController.updateUser);
 router.delete('/:id', authenticate, userController.deleteUser);

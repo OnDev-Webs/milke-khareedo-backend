@@ -61,3 +61,4 @@ leadActivitySchema.index({ leadId: 1, activityType: 1 });
 
 module.exports = mongoose.model('LeadActivity', leadActivitySchema);
 
+

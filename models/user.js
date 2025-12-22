@@ -70,6 +70,13 @@ const userSchema = new mongoose.Schema({
         ref: 'Role',
         required: true
     },
+    isPhoneVerified: {
+        type: Boolean,
+        default: false
+    },
+    phoneVerifiedAt: {
+        type: Date
+    }
 }, {
     timestamps: true
 });

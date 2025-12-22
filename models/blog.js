@@ -82,3 +82,4 @@ blogSchema.index({ author: 1 });
 blogSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('Blog', blogSchema);
+

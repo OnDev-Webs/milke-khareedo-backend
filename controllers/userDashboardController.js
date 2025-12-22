@@ -13,6 +13,23 @@ exports.getUserDashboard = async (req, res) => {
     try {
         const userId = req.user.userId;
 
+        // Check if phone is verified
+        const user = await User.findById(userId).select('isPhoneVerified').lean();
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        if (!user.isPhoneVerified) {
+            return res.status(403).json({
+                success: false,
+                message: 'Please verify your phone number with OTP to access dashboard',
+                requiresOTPVerification: true
+            });
+        }
+
         // Optimize: Run all count queries in parallel
         const [totalViewed, totalFavorited, totalVisited] = await Promise.all([
             UserPropertyActivity.countDocuments({ userId, activityType: "viewed" }),
