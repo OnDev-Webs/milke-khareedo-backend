@@ -108,8 +108,11 @@ router.post('/blog', authenticate, upload.fields([
     { name: 'bannerImage', maxCount: 1 },
     { name: 'galleryImages', maxCount: 10 }
 ]), authorizeBlogAdd, adminController.createBlog);
+
 router.get('/blogs', authenticate, authorizeBlogView, adminController.getAllBlogs);
+
 router.get('/blog/:id', authenticate, authorizeBlogView, adminController.getBlogById);
+
 router.put('/blog/:id', authenticate, upload.fields([
     { name: 'bannerImage', maxCount: 1 },
     { name: 'galleryImages', maxCount: 10 }
