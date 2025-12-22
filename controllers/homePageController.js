@@ -23,6 +23,45 @@ const convertConnectivityToObject = (connectivity) => {
     return {};
 };
 
+// Helper function to extract prices from configurations (handles both old and new format)
+// Price is now stored as Number (in rupees), but we handle legacy string format too
+const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
+    const prices = [];
+    if (!configurations || !Array.isArray(configurations)) return prices;
+
+    // Helper to parse price (handles both number and string)
+    const parsePrice = (price) => {
+        if (!price) return 0;
+        // If already a number, return it
+        if (typeof price === 'number') return price;
+        // Parse string price
+        let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+        const priceStrLower = price.toString().toLowerCase();
+        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+            priceNum = priceNum * 100000;
+        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+            priceNum = priceNum * 10000000;
+        }
+        return priceNum;
+    };
+
+    configurations.forEach(config => {
+        if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+            // New format: subConfigurations array (price is Number)
+            config.subConfigurations.forEach(subConfig => {
+                const priceNum = parsePrice(subConfig.price || fallbackPrice);
+                if (priceNum > 0) prices.push(priceNum);
+            });
+        } else {
+            // Legacy format: direct price field (might be string)
+            const priceNum = parsePrice(config.price || fallbackPrice);
+            if (priceNum > 0) prices.push(priceNum);
+        }
+    });
+
+    return prices;
+};
+
 // Helper function to get IP address from request
 const getClientIpAddress = (req) => {
     // Check for IP in various headers (for proxies/load balancers)
@@ -172,25 +211,22 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 : (property.developer?.toString() || property.developer);
             const developerInfo = developerMap.get(developerId);
 
-            // Calculate price ranges
-            const prices = property.configurations
-                .map(config => {
-                    const priceStr = config.price || property.developerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                })
-                .filter(price => price > 0);
+            // Calculate price ranges from subConfigurations
+            const prices = extractPricesFromConfigurations(property.configurations, property.developerPrice || '0');
 
             const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-            // Get unit types
-            const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
+            // Get unit types from configurations
+            const unitTypes = [];
+            if (property.configurations && Array.isArray(property.configurations)) {
+                property.configurations.forEach(config => {
+                    if (config.unitType) {
+                        unitTypes.push(config.unitType);
+                    }
+                });
+            }
+            const uniqueUnitTypes = [...new Set(unitTypes)];
 
             // Get cover image
             const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
@@ -269,9 +305,33 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 // Group Size
                 groupSize: property.minGroupMembers || 0,
                 groupSizeFormatted: `${String(property.minGroupMembers || 0).padStart(2, '0')} Members`,
-                // Opening (available units) - can be calculated from configurations
-                openingLeft: property.configurations?.filter(c => c.availabilityStatus === 'Available').length || 0,
-                openingFormatted: `${String(property.configurations?.filter(c => c.availabilityStatus === 'Available').length || 0).padStart(2, '0')} Left`,
+                // Opening (available units) - calculated from subConfigurations
+                openingLeft: (() => {
+                    let count = 0;
+                    if (property.configurations && Array.isArray(property.configurations)) {
+                        property.configurations.forEach(config => {
+                            if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                                count += config.subConfigurations.filter(sc => sc.availabilityStatus === 'Available' || sc.availabilityStatus === 'Ready').length;
+                            } else if (config.availabilityStatus === 'Available' || config.availabilityStatus === 'Ready') {
+                                count += 1;
+                            }
+                        });
+                    }
+                    return count;
+                })(),
+                openingFormatted: (() => {
+                    let count = 0;
+                    if (property.configurations && Array.isArray(property.configurations)) {
+                        property.configurations.forEach(config => {
+                            if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                                count += config.subConfigurations.filter(sc => sc.availabilityStatus === 'Available' || sc.availabilityStatus === 'Ready').length;
+                            } else if (config.availabilityStatus === 'Available' || config.availabilityStatus === 'Ready') {
+                                count += 1;
+                            }
+                        });
+                    }
+                    return `${String(count).padStart(2, '0')} Left`;
+                })(),
                 // Pricing
                 targetPrice: {
                     value: minPrice,
@@ -469,7 +529,7 @@ exports.searchProperties = async (req, res, next) => {
             ...propertyFilter,
             _id: { $nin: propertiesWithLeads.map(p => p._id) }
         })
-            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer reraId description relationshipManager possessionDate carpetArea builtUpArea projectSize')
+            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer reraId description relationshipManager possessionDate projectSize')
             .lean();
 
         // Combine and add leadCount = 0 for properties without leads
@@ -497,12 +557,10 @@ exports.searchProperties = async (req, res, next) => {
             const maxPriceFilter = priceMax ? parsePriceToNumber(priceMax) : Infinity;
 
             allProperties = allProperties.filter(property => {
-                const prices = property.configurations
-                    ?.map(config => {
-                        const priceStr = config.price || property.developerPrice || property.offerPrice || '0';
-                        return parsePriceToNumber(priceStr);
-                    })
-                    .filter(price => price > 0) || [];
+                const prices = extractPricesFromConfigurations(
+                    property.configurations,
+                    property.developerPrice || property.offerPrice || '0'
+                ).map(priceStr => parsePriceToNumber(priceStr)).filter(p => p > 0);
 
                 if (prices.length === 0) return false;
 
@@ -524,55 +582,49 @@ exports.searchProperties = async (req, res, next) => {
                 return dateB - dateA; // Newest first
             });
         } else if (sortBy === 'priceLow') {
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
             allProperties.sort((a, b) => {
-                const priceA = Math.min(...(a.configurations?.map(config => {
-                    const priceStr = config.price || a.developerPrice || a.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                }).filter(p => p > 0) || [0]));
-                const priceB = Math.min(...(b.configurations?.map(config => {
-                    const priceStr = config.price || b.developerPrice || b.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                }).filter(p => p > 0) || [0]));
+                const fallbackA = parsePrice(a.developerPrice || a.offerPrice || 0);
+                const fallbackB = parsePrice(b.developerPrice || b.offerPrice || 0);
+                const pricesA = extractPricesFromConfigurations(a.configurations, fallbackA);
+                const pricesB = extractPricesFromConfigurations(b.configurations, fallbackB);
+                const priceA = pricesA.length > 0 ? Math.min(...pricesA) : 0;
+                const priceB = pricesB.length > 0 ? Math.min(...pricesB) : 0;
                 return priceA - priceB;
             });
         } else if (sortBy === 'priceHigh') {
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
             allProperties.sort((a, b) => {
-                const priceA = Math.max(...(a.configurations?.map(config => {
-                    const priceStr = config.price || a.developerPrice || a.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                }).filter(p => p > 0) || [0]));
-                const priceB = Math.max(...(b.configurations?.map(config => {
-                    const priceStr = config.price || b.developerPrice || b.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                }).filter(p => p > 0) || [0]));
+                const fallbackA = parsePrice(a.developerPrice || a.offerPrice || 0);
+                const fallbackB = parsePrice(b.developerPrice || b.offerPrice || 0);
+                const pricesA = extractPricesFromConfigurations(a.configurations, fallbackA);
+                const pricesB = extractPricesFromConfigurations(b.configurations, fallbackB);
+                const priceA = pricesA.length > 0 ? Math.max(...pricesA) : 0;
+                const priceB = pricesB.length > 0 ? Math.max(...pricesB) : 0;
                 return priceB - priceA;
             });
         } else {
@@ -615,18 +667,21 @@ exports.searchProperties = async (req, res, next) => {
             const developerInfo = developerMap.get(developerId);
 
             // Calculate price ranges
-            const prices = property.configurations
-                ?.map(config => {
-                    const priceStr = config.price || property.developerPrice || property.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                })
-                .filter(price => price > 0) || [];
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
             const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
@@ -935,31 +990,41 @@ exports.getPropertyById = async (req, res, next) => {
         }
 
         // Calculate price ranges from configurations
-        const prices = property.configurations
-            .map(config => {
-                const priceStr = config.price || property.developerPrice || '0';
-                let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-
-                if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                    priceNum = priceNum * 10000000;
-                }
-                return priceNum;
-            })
-            .filter(price => price > 0);
+        // Helper to parse price (handles both number and string for legacy support)
+        const parsePrice = (price) => {
+            if (!price) return 0;
+            if (typeof price === 'number') return price;
+            let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+            const priceStrLower = price.toString().toLowerCase();
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                priceNum = priceNum * 100000;
+            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                priceNum = priceNum * 10000000;
+            }
+            return priceNum;
+        };
+        const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+        const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
         const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
         const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-        // Calculate area ranges
-        const areas = property.configurations
-            .map(config => {
-                const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
-                const builtUpArea = parseFloat(config.builtUpArea?.replace(/[sqft,\s]/gi, '') || '0');
-                return Math.max(carpetArea, builtUpArea);
-            })
-            .filter(area => area > 0);
+        // Calculate area ranges from subConfigurations
+        const areas = [];
+        if (property.configurations && Array.isArray(property.configurations)) {
+            property.configurations.forEach(config => {
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    config.subConfigurations.forEach(subConfig => {
+                        const carpetArea = parseFloat(subConfig.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                        if (carpetArea > 0) areas.push(carpetArea);
+                    });
+                } else {
+                    // Legacy format
+                    const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                    if (carpetArea > 0) areas.push(carpetArea);
+                }
+            });
+        }
 
         const minArea = areas.length > 0 ? Math.min(...areas) : 0;
         const maxArea = areas.length > 0 ? Math.max(...areas) : 0;
@@ -1060,20 +1125,43 @@ exports.getPropertyById = async (req, res, next) => {
                     order: img.order
                 }))
             },
-            // Layout Plans
-            layoutPlans: property.layouts?.map(layout => {
-                // Find matching configuration for price
-                const matchingConfig = property.configurations.find(
-                    config => config.unitType === layout.configurationUnitType
-                );
-
-                return {
-                    unitType: layout.configurationUnitType,
-                    image: layout.image,
-                    area: matchingConfig ? (matchingConfig.builtUpArea || matchingConfig.carpetArea) : null,
-                    price: matchingConfig?.price || null
-                };
-            }) || [],
+            // Layout Plans - extracted from subConfigurations
+            layoutPlans: (() => {
+                const layoutPlans = [];
+                if (property.configurations && Array.isArray(property.configurations)) {
+                    property.configurations.forEach(config => {
+                        if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                            config.subConfigurations.forEach(subConfig => {
+                                if (subConfig.layoutPlanImages && subConfig.layoutPlanImages.length > 0) {
+                                    subConfig.layoutPlanImages.forEach(imageUrl => {
+                                        layoutPlans.push({
+                                            image: imageUrl,
+                                            unitType: config.unitType,
+                                            carpetArea: subConfig.carpetArea,
+                                            price: subConfig.price
+                                        });
+                                    });
+                                }
+                            });
+                        }
+                    });
+                }
+                // Legacy support
+                if (property.layouts && Array.isArray(property.layouts)) {
+                    property.layouts.forEach(layout => {
+                        const matchingConfig = property.configurations?.find(
+                            c => c.unitType === layout.configurationUnitType
+                        );
+                        layoutPlans.push({
+                            image: layout.image || layout,
+                            unitType: layout.configurationUnitType || null,
+                            area: matchingConfig ? matchingConfig.carpetArea : null,
+                            price: matchingConfig?.price || null
+                        });
+                    });
+                }
+                return layoutPlans;
+            })(),
             // Neighborhood / Connectivity
             neighborhood: {
                 connectivity: convertConnectivityToObject(property.connectivity),
@@ -1113,14 +1201,45 @@ exports.getPropertyById = async (req, res, next) => {
                 email: property.relationshipManager.email,
                 phone: property.relationshipManager.phone
             } : null,
-            // Full configurations for detailed view
-            configurations: property.configurations.map(config => ({
-                unitType: config.unitType,
-                carpetArea: config.carpetArea,
-                builtUpArea: config.builtUpArea,
-                price: config.price,
-                availabilityStatus: config.availabilityStatus
-            })),
+            // Full configurations for detailed view (with subConfigurations)
+            configurations: property.configurations ? property.configurations.map(config => {
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    // New format: return with subConfigurations
+                    return {
+                        unitType: config.unitType,
+                        subConfigurations: config.subConfigurations.map(subConfig => ({
+                            carpetArea: subConfig.carpetArea,
+                            price: subConfig.price,
+                            availabilityStatus: subConfig.availabilityStatus,
+                            layoutPlanImages: subConfig.layoutPlanImages || []
+                        }))
+                    };
+                } else {
+                    // Legacy format: convert to new format
+                    // Helper to parse price (handles both number and string)
+                    const parsePrice = (price) => {
+                        if (!price) return 0;
+                        if (typeof price === 'number') return price;
+                        let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                        const priceStrLower = price.toString().toLowerCase();
+                        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                            priceNum = priceNum * 100000;
+                        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                            priceNum = priceNum * 10000000;
+                        }
+                        return priceNum;
+                    };
+                    return {
+                        unitType: config.unitType,
+                        subConfigurations: [{
+                            carpetArea: config.carpetArea || '',
+                            price: parsePrice(config.price),
+                            availabilityStatus: config.availabilityStatus || 'Available',
+                            layoutPlanImages: []
+                        }]
+                    };
+                }
+            }) : [],
             // Additional metadata
             projectSize: property.projectSize,
             landParcel: property.landParcel,
@@ -1298,8 +1417,11 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
         const allProperties = await Property.find({
             _id: { $ne: currentProperty._id },
             isStatus: true,
-            // Filter for properties with available configurations
-            'configurations.availabilityStatus': { $in: ['Available', 'Ready'] }
+            // Filter for properties with available configurations (check subConfigurations)
+            $or: [
+                { 'configurations.subConfigurations.availabilityStatus': { $in: ['Available', 'Ready'] } },
+                { 'configurations.availabilityStatus': { $in: ['Available', 'Ready'] } } // Legacy support
+            ]
         })
             .populate('developer', 'developerName')
             .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus possessionDate developer')
@@ -1312,18 +1434,21 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
             let locationMatch = false;
 
             // Calculate property prices
-            const propPrices = prop.configurations
-                .map(config => {
-                    const priceStr = config.price || prop.developerPrice || prop.offerPrice || '0';
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                })
-                .filter(price => price > 0);
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+            const fallbackPrice = parsePrice(prop.developerPrice || prop.offerPrice || 0);
+            const propPrices = extractPricesFromConfigurations(prop.configurations, fallbackPrice);
 
             const propMinPrice = propPrices.length > 0 ? Math.min(...propPrices) : 0;
             const propMaxPrice = propPrices.length > 0 ? Math.max(...propPrices) : 0;
@@ -1428,18 +1553,7 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                 const prop = item.property;
 
                 // Calculate prices for similar project
-                const simPrices = prop.configurations
-                    .map(config => {
-                        const priceStr = config.price || prop.developerPrice || '0';
-                        let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                        if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                            priceNum = priceNum * 100000;
-                        } else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                            priceNum = priceNum * 10000000;
-                        }
-                        return priceNum;
-                    })
-                    .filter(price => price > 0);
+                const simPrices = extractPricesFromConfigurations(prop.configurations, prop.developerPrice || '0');
 
                 const simMinPrice = simPrices.length > 0 ? Math.min(...simPrices) : 0;
                 const simMaxPrice = simPrices.length > 0 ? Math.max(...simPrices) : 0;
@@ -2399,7 +2513,7 @@ exports.compareProperties = async (req, res, next) => {
         })
             .populate('developer', 'developerName')
             .populate('relationshipManager', 'name email phone')
-            .select('projectName developer location latitude longitude configurations images layouts possessionDate possessionStatus projectId developerPrice offerPrice discountPercentage')
+            .select('projectName developer location latitude longitude configurations images possessionDate possessionStatus projectId developerPrice offerPrice discountPercentage')
             .lean();
 
         // Check if all properties were found
@@ -2415,25 +2529,21 @@ exports.compareProperties = async (req, res, next) => {
         // Format properties for comparison
         const formattedProperties = properties.map(property => {
             // Calculate budget range from configurations
-            const prices = property.configurations
-                .map(config => {
-                    const priceStr = config.price || '0';
-                    // Remove currency symbols, spaces, and convert to number
-                    // Handle both lakhs and crores format
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-
-                    // If price is in lakhs (less than 1000000), convert to rupees
-                    if (priceStr.toLowerCase().includes('lakh') || priceStr.toLowerCase().includes('l')) {
-                        priceNum = priceNum * 100000;
-                    }
-                    // If price is in crores (contains 'cr' or 'crore'), convert to rupees
-                    else if (priceStr.toLowerCase().includes('cr') || priceStr.toLowerCase().includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-
-                    return priceNum;
-                })
-                .filter(price => price > 0);
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
             // Also check root level developerPrice and offerPrice
             if (property.developerPrice) {
@@ -2450,13 +2560,21 @@ exports.compareProperties = async (req, res, next) => {
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
             // Calculate area range from configurations
-            const areas = property.configurations
-                .map(config => {
-                    const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
-                    const builtUpArea = parseFloat(config.builtUpArea?.replace(/[sqft,\s]/gi, '') || '0');
-                    return Math.max(carpetArea, builtUpArea);
-                })
-                .filter(area => area > 0);
+            const areas = [];
+            if (property.configurations && Array.isArray(property.configurations)) {
+                property.configurations.forEach(config => {
+                    if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                        config.subConfigurations.forEach(subConfig => {
+                            const carpetArea = parseFloat(subConfig.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                            if (carpetArea > 0) areas.push(carpetArea);
+                        });
+                    } else {
+                        // Legacy format
+                        const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                        if (carpetArea > 0) areas.push(carpetArea);
+                    }
+                });
+            }
 
             const minArea = areas.length > 0 ? Math.min(...areas) : 0;
             const maxArea = areas.length > 0 ? Math.max(...areas) : 0;
@@ -2467,8 +2585,37 @@ exports.compareProperties = async (req, res, next) => {
             // Get cover image or first image
             const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
 
-            // Get floor plan images (layouts)
-            const floorPlans = property.layouts?.map(layout => ({
+            // Get floor plan images from subConfigurations
+            const floorPlans = [];
+            if (property.configurations && Array.isArray(property.configurations)) {
+                property.configurations.forEach(config => {
+                    if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                        config.subConfigurations.forEach(subConfig => {
+                            if (subConfig.layoutPlanImages && subConfig.layoutPlanImages.length > 0) {
+                                subConfig.layoutPlanImages.forEach(imageUrl => {
+                                    floorPlans.push({
+                                        image: imageUrl,
+                                        unitType: config.unitType,
+                                        carpetArea: subConfig.carpetArea,
+                                        price: subConfig.price
+                                    });
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+            // Legacy support: also check old layouts array
+            if (property.layouts && Array.isArray(property.layouts)) {
+                property.layouts.forEach(layout => {
+                    floorPlans.push({
+                        image: layout.image || layout,
+                        unitType: layout.configurationUnitType || null
+                    });
+                });
+            }
+
+            const floorPlansFormatted = floorPlans.map(plan => ({
                 image: layout.image,
                 unitType: layout.configurationUnitType
             })) || [];

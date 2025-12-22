@@ -163,7 +163,7 @@ exports.adminLogin = async (req, res, next) => {
                 userId: user._id,
                 email: user.email,
                 roleId: user.role._id,
-                roleName: user.role.name   
+                roleName: user.role.name
             },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
@@ -355,9 +355,12 @@ exports.createProperty = async (req, res, next) => {
         configurations = safeJSON(configurations, []);
         highlights = safeJSON(highlights, []);
         amenities = safeJSON(amenities, []);
-        layouts = safeJSON(layouts, []);
         connectivity = safeJSON(connectivity, {});
         leadDistributionAgents = safeJSON(leadDistributionAgents, []);
+
+        // Parse layout images mapping (maps layout images to specific subConfigurations)
+        // Format: { "unitType": { "carpetArea": ["imageUrl1", "imageUrl2"], ... }, ... }
+        const layoutImagesMapping = safeJSON(req.body.layoutImagesMapping, {});
 
         // Convert connectivity object to Map for dynamic structure
         let connectivityMap = new Map();
@@ -369,16 +372,38 @@ exports.createProperty = async (req, res, next) => {
             });
         }
 
+        // Helper function to parse price string to number (in rupees)
+        const parsePriceToNumber = (priceStr) => {
+            if (!priceStr) return 0;
+            // If already a number, return it
+            if (typeof priceStr === 'number') return priceStr;
+            // Parse string price
+            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+            const priceStrLower = priceStr.toString().toLowerCase();
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                priceNum = priceNum * 100000;
+            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                priceNum = priceNum * 10000000;
+            }
+            return priceNum;
+        };
+
         // Parse numeric fields
         if (latitude) latitude = parseFloat(latitude);
         if (longitude) longitude = parseFloat(longitude);
         if (minGroupMembers) minGroupMembers = parseInt(minGroupMembers);
         if (possessionDate) possessionDate = new Date(possessionDate);
 
+        // Parse price fields (convert string to number)
+        if (developerPrice) developerPrice = parsePriceToNumber(developerPrice);
+        if (offerPrice) offerPrice = parsePriceToNumber(offerPrice);
+
         // Initialize upload arrays
         let uploadedImages = [];
-        let uploadedLayouts = [];
         let uploadedQrImage = null;
+
+        // Store layout images by their field name (e.g., "layout_1BHK_3500" or index-based)
+        const layoutImagesMap = new Map();
 
         // ---------- Developer Validation ----------
         const dev = await Developer.findById(developer).lean();
@@ -460,13 +485,79 @@ exports.createProperty = async (req, res, next) => {
             }
         }
 
-        if (req.files?.layouts && req.files.layouts.length > 0) {
-            for (let i = 0; i < req.files.layouts.length; i++) {
-                const url = await uploadToS3(req.files.layouts[i], 'properties/layouts');
-                uploadedLayouts.push({
-                    image: url,
-                    configurationUnitType: layouts[i]?.configurationUnitType || null
-                });
+        // Handle layout plan images upload
+        // Layout images can be uploaded with field names like "layout_1BHK_3500" or as array
+        if (req.files) {
+            for (const [fieldName, files] of Object.entries(req.files)) {
+                if (fieldName.startsWith('layout_')) {
+                    // Field name format: layout_1BHK_3500 or layout_1BHK_3500_0 (for multiple images)
+                    const key = fieldName.replace('layout_', '');
+                    const fileArray = Array.isArray(files) ? files : [files];
+
+                    for (const file of fileArray) {
+                        const url = await uploadToS3(file, 'properties/layouts');
+                        if (!layoutImagesMap.has(key)) {
+                            layoutImagesMap.set(key, []);
+                        }
+                        layoutImagesMap.get(key).push(url);
+                    }
+                }
+            }
+        }
+
+        // Process configurations and map layout images to subConfigurations
+        // Note: parsePriceToNumber is already defined above
+        if (Array.isArray(configurations) && configurations.length > 0) {
+            for (let configIndex = 0; configIndex < configurations.length; configIndex++) {
+                const config = configurations[configIndex];
+
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
+                        const subConfig = config.subConfigurations[subIndex];
+
+                        // Convert price from string to number (in rupees)
+                        if (subConfig.price) {
+                            subConfig.price = parsePriceToNumber(subConfig.price);
+                        }
+
+                        // Initialize layoutPlanImages array if not exists
+                        if (!subConfig.layoutPlanImages) {
+                            subConfig.layoutPlanImages = [];
+                        }
+
+                        // Try to find layout images for this sub-configuration
+                        // Key format: unitType_carpetArea (e.g., "1BHK_3500")
+                        const unitTypeKey = (config.unitType || '').replace(/\s+/g, '');
+                        const carpetAreaKey = (subConfig.carpetArea || '').replace(/\s+/g, '').replace(/[^0-9.]/g, '');
+                        const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
+
+                        // Check if layout images exist for this key
+                        if (layoutImagesMap.has(lookupKey)) {
+                            subConfig.layoutPlanImages = layoutImagesMap.get(lookupKey);
+                        } else {
+                            // Try alternative key formats
+                            const altKey1 = `${configIndex}_${subIndex}`;
+                            const altKey2 = `layout_${configIndex}_${subIndex}`;
+
+                            if (layoutImagesMap.has(altKey1)) {
+                                subConfig.layoutPlanImages = layoutImagesMap.get(altKey1);
+                            } else if (layoutImagesMap.has(altKey2)) {
+                                subConfig.layoutPlanImages = layoutImagesMap.get(altKey2);
+                            }
+                        }
+
+                        // Also check layoutImagesMapping from request body
+                        if (layoutImagesMapping && layoutImagesMapping[config.unitType]) {
+                            const unitTypeMapping = layoutImagesMapping[config.unitType];
+                            if (unitTypeMapping[subConfig.carpetArea]) {
+                                const mappedImages = Array.isArray(unitTypeMapping[subConfig.carpetArea])
+                                    ? unitTypeMapping[subConfig.carpetArea]
+                                    : [unitTypeMapping[subConfig.carpetArea]];
+                                subConfig.layoutPlanImages = [...subConfig.layoutPlanImages, ...mappedImages];
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -475,25 +566,11 @@ exports.createProperty = async (req, res, next) => {
             uploadedQrImage = await uploadToS3(qrFile, 'properties/rera');
         }
 
-        // Helper function to calculate discount percentage
+        // Calculate discount percentage (prices are already numbers)
         const calculateDiscountPercentage = (devPrice, offerPrice) => {
             if (!devPrice || !offerPrice) return "00.00%";
-
-            const parsePriceToNumber = (priceStr) => {
-                if (!priceStr) return 0;
-                let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                const priceStrLower = priceStr.toLowerCase();
-                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                    priceNum = priceNum * 10000000;
-                }
-                return priceNum;
-            };
-
-            const devPriceNum = parsePriceToNumber(devPrice);
-            const offerPriceNum = parsePriceToNumber(offerPrice);
-
+            const devPriceNum = typeof devPrice === 'number' ? devPrice : parsePriceToNumber(devPrice);
+            const offerPriceNum = typeof offerPrice === 'number' ? offerPrice : parsePriceToNumber(offerPrice);
             if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
                 const discount = ((devPriceNum - offerPriceNum) / devPriceNum) * 100;
                 return `${discount.toFixed(2)}%`;
@@ -526,7 +603,6 @@ exports.createProperty = async (req, res, next) => {
             images: uploadedImages,
             highlights,
             amenities,
-            layouts: uploadedLayouts,
             connectivity: connectivityMap.size > 0 ? connectivityMap : new Map(),
             relationshipManager,
             leadDistributionAgents,
@@ -673,21 +749,48 @@ exports.getAllProperties = async (req, res, next) => {
         const enhancedProperties = properties.map((property) => {
             const p = { ...property };
 
-            // Ensure images and layouts are included (even if empty arrays)
+            // Ensure images are included (even if empty array)
             p.images = p.images || [];
-            p.layouts = p.layouts || [];
 
             // Convert connectivity Map to object for JSON response
             p.connectivity = convertConnectivityToObject(p.connectivity);
 
-            // Map layouts with configuration info
-            p.layouts = (p.layouts || []).map((layout) => {
-                const config = (p.configurations || []).find((c) => c.unitType === layout.configurationUnitType);
-                return {
-                    ...layout,
-                    configuration: config || null
-                };
-            });
+            // Ensure configurations have proper structure with subConfigurations
+            if (p.configurations && Array.isArray(p.configurations)) {
+                p.configurations = p.configurations.map((config) => {
+                    if (!config.subConfigurations || !Array.isArray(config.subConfigurations)) {
+                        // Legacy format - convert to new format
+                        // Helper to parse price
+                        const parsePrice = (priceStr) => {
+                            if (!priceStr) return 0;
+                            if (typeof priceStr === 'number') return priceStr;
+                            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+                            const priceStrLower = priceStr.toString().toLowerCase();
+                            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                                priceNum = priceNum * 100000;
+                            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                                priceNum = priceNum * 10000000;
+                            }
+                            return priceNum;
+                        };
+                        return {
+                            unitType: config.unitType || '',
+                            subConfigurations: [{
+                                carpetArea: config.carpetArea || '',
+                                price: parsePrice(config.price),
+                                availabilityStatus: config.availabilityStatus || 'Available',
+                                layoutPlanImages: []
+                            }]
+                        };
+                    }
+                    return config;
+                });
+            } else {
+                p.configurations = [];
+            }
+
+            // Remove old layouts reference (layouts are now in subConfigurations)
+            delete p.layouts;
 
             // Add joined group count
             const propIdStr = property._id.toString();
@@ -727,16 +830,39 @@ exports.getPropertyById = async (req, res, next) => {
         // Convert connectivity Map to object for JSON response
         p.connectivity = convertConnectivityToObject(p.connectivity);
 
-        p.layouts = p.layouts.map((layout) => {
-            const config = p.configurations.find(
-                (c) => c.unitType === layout.configurationUnitType
-            );
-
-            return {
-                ...layout,
-                configuration: config || null
-            };
-        });
+        // Ensure configurations have proper structure with subConfigurations
+        if (p.configurations && Array.isArray(p.configurations)) {
+            p.configurations = p.configurations.map((config) => {
+                if (!config.subConfigurations || !Array.isArray(config.subConfigurations)) {
+                    // Legacy format - convert to new format
+                    // Helper to parse price
+                    const parsePrice = (priceStr) => {
+                        if (!priceStr) return 0;
+                        if (typeof priceStr === 'number') return priceStr;
+                        let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+                        const priceStrLower = priceStr.toString().toLowerCase();
+                        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                            priceNum = priceNum * 100000;
+                        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                            priceNum = priceNum * 10000000;
+                        }
+                        return priceNum;
+                    };
+                    return {
+                        unitType: config.unitType || '',
+                        subConfigurations: [{
+                            carpetArea: config.carpetArea || '',
+                            price: parsePrice(config.price),
+                            availabilityStatus: config.availabilityStatus || 'Available',
+                            layoutPlanImages: []
+                        }]
+                    };
+                }
+                return config;
+            });
+        } else {
+            p.configurations = [];
+        }
 
         res.json({
             success: true,
@@ -779,7 +905,41 @@ exports.updateProperty = async (req, res, next) => {
         updates.configurations = safeJSON(req.body.configurations, []);
         updates.highlights = safeJSON(req.body.highlights, []);
         updates.amenities = safeJSON(req.body.amenities, []);
-        updates.layouts = safeJSON(req.body.layouts, []);
+
+        // Parse layout images mapping for update
+        const layoutImagesMapping = safeJSON(req.body.layoutImagesMapping, {});
+
+        // Helper function to parse price string to number (in rupees)
+        const parsePriceToNumber = (priceStr) => {
+            if (!priceStr) return 0;
+            // If already a number, return it
+            if (typeof priceStr === 'number') return priceStr;
+            // Parse string price
+            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+            const priceStrLower = priceStr.toString().toLowerCase();
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                priceNum = priceNum * 100000;
+            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                priceNum = priceNum * 10000000;
+            }
+            return priceNum;
+        };
+
+        // Process configurations to convert price strings to numbers
+        if (updates.configurations && Array.isArray(updates.configurations)) {
+            for (let configIndex = 0; configIndex < updates.configurations.length; configIndex++) {
+                const config = updates.configurations[configIndex];
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
+                        const subConfig = config.subConfigurations[subIndex];
+                        // Convert price from string to number (in rupees)
+                        if (subConfig.price) {
+                            subConfig.price = parsePriceToNumber(subConfig.price);
+                        }
+                    }
+                }
+            }
+        }
         // Handle connectivity update - convert to Map for dynamic structure
         if (req.body.connectivity !== undefined) {
             const connectivityData = safeJSON(req.body.connectivity, {});
@@ -795,30 +955,25 @@ exports.updateProperty = async (req, res, next) => {
         }
         updates.leadDistributionAgents = safeJSON(req.body.leadDistributionAgents, []);
 
+        // Parse price fields if being updated (convert string to number)
+        // Note: parsePriceToNumber is already defined above
+        if (updates.developerPrice) {
+            updates.developerPrice = parsePriceToNumber(updates.developerPrice);
+        }
+        if (updates.offerPrice) {
+            updates.offerPrice = parsePriceToNumber(updates.offerPrice);
+        }
+
         // Calculate discount percentage if developerPrice or offerPrice is being updated
         if (updates.developerPrice || updates.offerPrice) {
             const currentProperty = await Property.findById(req.params.id).select('developerPrice offerPrice').lean();
-            const devPrice = updates.developerPrice || currentProperty?.developerPrice;
-            const offerPrice = updates.offerPrice || currentProperty?.offerPrice;
+            const devPrice = updates.developerPrice !== undefined ? updates.developerPrice : (currentProperty?.developerPrice || 0);
+            const offerPrice = updates.offerPrice !== undefined ? updates.offerPrice : (currentProperty?.offerPrice || 0);
 
             const calculateDiscountPercentage = (devPrice, offerPrice) => {
                 if (!devPrice || !offerPrice) return "00.00%";
-
-                const parsePriceToNumber = (priceStr) => {
-                    if (!priceStr) return 0;
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                };
-
-                const devPriceNum = parsePriceToNumber(devPrice);
-                const offerPriceNum = parsePriceToNumber(offerPrice);
-
+                const devPriceNum = typeof devPrice === 'number' ? devPrice : parsePriceToNumber(devPrice);
+                const offerPriceNum = typeof offerPrice === 'number' ? offerPrice : parsePriceToNumber(offerPrice);
                 if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
                     const discount = ((devPriceNum - offerPriceNum) / devPriceNum) * 100;
                     return `${discount.toFixed(2)}%`;
@@ -888,17 +1043,7 @@ exports.updateProperty = async (req, res, next) => {
             updates.images = uploadedImages;
         }
 
-        if (req.files?.layouts) {
-            const layoutsFromBody = updates.layouts;
-            for (let i = 0; i < req.files.layouts.length; i++) {
-                const url = await uploadToS3(req.files.layouts[i]);
-                uploadedLayouts.push({
-                    image: url,
-                    configurationUnitType: layoutsFromBody[i]?.configurationUnitType || null
-                });
-            }
-            updates.layouts = uploadedLayouts;
-        }
+        // Layout images are now handled in configurations processing above
 
         if (req.files?.reraQrImage) {
             uploadedQrImage = await uploadToS3(req.files.reraQrImage[0]);
@@ -2167,8 +2312,8 @@ exports.createUser = async (req, res) => {
             lastName,
             email: email.toLowerCase().trim(),
             password,
-            phoneNumber: phone,   
-            countryCode: '+91',   
+            phoneNumber: phone,
+            countryCode: '+91',
             role
         });
 
