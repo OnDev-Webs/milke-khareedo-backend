@@ -75,6 +75,8 @@ router.delete('/delete_developer/:id', authenticate, authorizeAdmin, adminContro
 router.get('/lead_list', authenticate, adminController.getLeadsList);
 router.get('/view_lead_list/:leadId', authenticate, adminController.viewLeadDetails);
 router.delete('/delete_lead_list/:leadId', authenticate, adminController.deleteLead);
+// EXPORT lEAD lIST AS CSV
+router.get('/leads/:leadId/export-csv', authenticate, adminController.exportLeadDetailsCSV);
 
 // Lead Timeline/Activity Routes
 router.post('/lead/:leadId/activity', authenticate, adminController.addLeadActivity);
@@ -99,7 +101,7 @@ router.delete('/delete_role/:id', authenticate, authorizeSuperAdmin, adminContro
 // ASSIGN NEW USER ROUTES
 router.post('/create_user', authenticate, authorizeSuperAdmin, adminController.createUser);
 router.get('/', authenticate, authorizeAdmin, adminController.getAllAssignUsers);
-router.get('/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
+router.get('/get_user/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
 router.put('/update_user/:id', authenticate, authorizeSuperAdmin, adminController.updateAssignUser);
 router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminController.deleteAssignUser);
 
