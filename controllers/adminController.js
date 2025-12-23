@@ -9,8 +9,11 @@ const Property = require('../models/property');
 const leadModal = require("../models/leadModal");
 const LeadActivity = require("../models/leadActivity");
 const Notification = require("../models/notification");
+const Blog = require("../models/blog");
 const { uploadToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
+const { sendPasswordSMS } = require("../utils/twilio");
+const { Parser } = require("json2csv");
 
 // AUTH SECTION
 
@@ -22,7 +25,6 @@ exports.registerSuperAdmin = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user already exists - optimize with lean()
         const existingUser = await User.findOne({ email }).select('email').lean();
         if (existingUser) {
             logInfo('Super admin registration attempt with existing email', { email });
@@ -32,7 +34,6 @@ exports.registerSuperAdmin = async (req, res, next) => {
             });
         }
 
-        // Create superadmin role with all permissions set to true
         const superAdminRole = await Role.create({
             name: 'Super Admin',
             permissions: {
@@ -60,11 +61,16 @@ exports.registerSuperAdmin = async (req, res, next) => {
                     edit: true,
                     view: true,
                     delete: true
+                },
+                blog: {
+                    add: true,
+                    edit: true,
+                    view: true,
+                    delete: true
                 }
             }
         });
 
-        // Create user with superadmin role
         const user = await User.create({
             name: 'Super Admin',
             email,
@@ -72,10 +78,8 @@ exports.registerSuperAdmin = async (req, res, next) => {
             role: superAdminRole._id
         });
 
-        // Populate role for response
         await user.populate('role');
 
-        // Generate JWT token
         const token = jwt.sign(
             { userId: user._id, email: user.email, roleId: user.role._id },
             jwtConfig.secret,
@@ -107,52 +111,61 @@ exports.registerSuperAdmin = async (req, res, next) => {
 };
 // ===================== ADMIN LOGIN =====================
 // @desc    Register superadmin
-// @route   POST /api/admin/admin_login
+// @route   POST /api/admin/login
 // @access  Public
 exports.adminLogin = async (req, res, next) => {
     try {
         const { email, password } = req.body;
 
-        // Check if user exists - optimize query
-        const user = await User.findOne({ email }).select('+password').populate('role', 'name permissions');
+        const user = await User.findOne({ email })
+            .select('+password')
+            .populate('role', 'name permissions');
 
+        // ❌ User not found
         if (!user) {
-            logInfo('Admin login attempt with invalid email', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
             });
         }
 
-        // Allowed roles for admin panel
-        const allowedRoles = ["admin", "Super Admin", "Project Manager", "CRM Manager"];
+        // ❌ Role not assigned
+        if (!user.role || !user.role.name) {
+            return res.status(403).json({
+                success: false,
+                message: "Role not assigned. Contact admin."
+            });
+        }
 
-        if (!allowedRoles.includes(user.role.name)) {
-            logInfo('Admin login attempt with unauthorized role', { email, role: user.role.name });
+        // ❌ Block only USER role
+        if (user.role.name.toLowerCase() === 'user') {
             return res.status(403).json({
                 success: false,
                 message: "You are not allowed to access admin panel"
             });
         }
 
-        // Check password
+        // ❌ Password mismatch
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
-            logInfo('Admin login attempt with invalid password', { email });
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials"
             });
         }
 
-        // Generate JWT token
+        // ✅ Generate JWT
         const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId: user.role._id },
+            {
+                userId: user._id,
+                email: user.email,
+                roleId: user.role._id,
+                roleName: user.role.name
+            },
             jwtConfig.secret,
             { expiresIn: jwtConfig.expiresIn }
         );
 
-        logInfo('Admin logged in successfully', { userId: user._id, email: user.email, role: user.role.name });
         return res.json({
             success: true,
             message: "Admin login successful",
@@ -172,7 +185,6 @@ exports.adminLogin = async (req, res, next) => {
         });
 
     } catch (error) {
-        logError('Error during admin login', error);
         next(error);
     }
 };
@@ -252,11 +264,9 @@ exports.changePassword = async (req, res) => {
         if (!isMatch) {
             return res.status(400).json({ success: false, message: 'Old password is incorrect' });
         }
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-        // ❌ DO NOT HASH MANUALLY
-        user.password = newPassword;
-
-        await user.save();
+        await User.findByIdAndUpdate(req.user.userId, { password: hashedPassword });
 
         res.json({ success: true, message: 'Password changed successfully' });
 
@@ -265,7 +275,6 @@ exports.changePassword = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
-
 
 // USER MANAGEMENT SECTION
 exports.getAllUsers = async (req, res, next) => {
@@ -299,7 +308,6 @@ exports.getUserById = async (req, res, next) => {
     }
 };
 
-
 // CREATE PROPERTY SECTION
 
 // Helper function to convert connectivity Map to object for JSON response
@@ -325,7 +333,6 @@ exports.createProperty = async (req, res, next) => {
         isStatus
     } = req.body;
     try {
-        // ---------- Safe JSON Parsing (MUST be done BEFORE validation) ----------
         const safeJSON = (value, fallback) => {
             try {
                 if (!value) return fallback;
@@ -336,15 +343,13 @@ exports.createProperty = async (req, res, next) => {
             }
         };
 
-        // Parse JSON fields BEFORE validation queries
         configurations = safeJSON(configurations, []);
         highlights = safeJSON(highlights, []);
         amenities = safeJSON(amenities, []);
-        layouts = safeJSON(layouts, []);
         connectivity = safeJSON(connectivity, {});
         leadDistributionAgents = safeJSON(leadDistributionAgents, []);
 
-        // Convert connectivity object to Map for dynamic structure
+        const layoutImagesMapping = safeJSON(req.body.layoutImagesMapping, {});
         let connectivityMap = new Map();
         if (connectivity && typeof connectivity === 'object') {
             Object.keys(connectivity).forEach(key => {
@@ -354,18 +359,32 @@ exports.createProperty = async (req, res, next) => {
             });
         }
 
-        // Parse numeric fields
+        const parsePriceToNumber = (priceStr) => {
+            if (!priceStr) return 0;
+            if (typeof priceStr === 'number') return priceStr;
+            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+            const priceStrLower = priceStr.toString().toLowerCase();
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                priceNum = priceNum * 100000;
+            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                priceNum = priceNum * 10000000;
+            }
+            return priceNum;
+        };
+
         if (latitude) latitude = parseFloat(latitude);
         if (longitude) longitude = parseFloat(longitude);
         if (minGroupMembers) minGroupMembers = parseInt(minGroupMembers);
         if (possessionDate) possessionDate = new Date(possessionDate);
 
-        // Initialize upload arrays
+        if (developerPrice) developerPrice = parsePriceToNumber(developerPrice);
+        if (offerPrice) offerPrice = parsePriceToNumber(offerPrice);
+
         let uploadedImages = [];
-        let uploadedLayouts = [];
         let uploadedQrImage = null;
 
-        // ---------- Developer Validation ----------
+        const layoutImagesMap = new Map();
+
         const dev = await Developer.findById(developer).lean();
         if (!dev) {
             logInfo('Property creation failed - invalid developer', { developer });
@@ -375,8 +394,6 @@ exports.createProperty = async (req, res, next) => {
             });
         }
 
-        // ---------- RM Validation (Role = project_manager) ----------
-        // Fetch Role ObjectId - optimize with lean()
         const projectManagerRole = await Role.findOne({ name: "Project Manager" }).lean();
 
         if (!projectManagerRole) {
@@ -397,16 +414,13 @@ exports.createProperty = async (req, res, next) => {
             }
         }
 
-        // ---------- Agents Validation (Role = agent) ----------
         const agentRole = await Role.findOne({ name: "Agent" }).lean();
 
         if (!agentRole) {
             return res.status(400).json({ success: false, message: "Role 'agent' not found" });
         }
 
-        // Validate leadDistributionAgents - ensure it's an array and contains valid ObjectIds
         if (leadDistributionAgents && Array.isArray(leadDistributionAgents) && leadDistributionAgents.length > 0) {
-            // Filter out invalid ObjectIds
             const validAgentIds = leadDistributionAgents.filter(id => mongoose.Types.ObjectId.isValid(id));
 
             if (validAgentIds.length !== leadDistributionAgents.length) {
@@ -428,30 +442,82 @@ exports.createProperty = async (req, res, next) => {
                 });
             }
         } else if (leadDistributionAgents && !Array.isArray(leadDistributionAgents)) {
-            // If leadDistributionAgents is provided but not an array, set it to empty array
             leadDistributionAgents = [];
         }
 
-        // ---------- File Upload ----------
         if (req.files?.images && req.files.images.length > 0) {
             for (let i = 0; i < req.files.images.length; i++) {
                 const file = req.files.images[i];
                 const url = await uploadToS3(file, 'properties/images');
                 uploadedImages.push({
                     url,
-                    isCover: i === 0, // First image is cover image
+                    isCover: i === 0, 
                     order: i + 1
                 });
             }
         }
 
-        if (req.files?.layouts && req.files.layouts.length > 0) {
-            for (let i = 0; i < req.files.layouts.length; i++) {
-                const url = await uploadToS3(req.files.layouts[i], 'properties/layouts');
-                uploadedLayouts.push({
-                    image: url,
-                    configurationUnitType: layouts[i]?.configurationUnitType || null
-                });
+        if (req.files) {
+            for (const [fieldName, files] of Object.entries(req.files)) {
+                if (fieldName.startsWith('layout_')) {
+                    const key = fieldName.replace('layout_', '');
+                    const fileArray = Array.isArray(files) ? files : [files];
+
+                    for (const file of fileArray) {
+                        const url = await uploadToS3(file, 'properties/layouts');
+                        if (!layoutImagesMap.has(key)) {
+                            layoutImagesMap.set(key, []);
+                        }
+                        layoutImagesMap.get(key).push(url);
+                    }
+                }
+            }
+        }
+
+        if (Array.isArray(configurations) && configurations.length > 0) {
+            for (let configIndex = 0; configIndex < configurations.length; configIndex++) {
+                const config = configurations[configIndex];
+
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
+                        const subConfig = config.subConfigurations[subIndex];
+
+                        if (subConfig.price) {
+                            subConfig.price = parsePriceToNumber(subConfig.price);
+                        }
+
+                        if (!subConfig.layoutPlanImages) {
+                            subConfig.layoutPlanImages = [];
+                        }
+
+                        const unitTypeKey = (config.unitType || '').replace(/\s+/g, '');
+                        const carpetAreaKey = (subConfig.carpetArea || '').replace(/\s+/g, '').replace(/[^0-9.]/g, '');
+                        const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
+
+                        if (layoutImagesMap.has(lookupKey)) {
+                            subConfig.layoutPlanImages = layoutImagesMap.get(lookupKey);
+                        } else {
+                            const altKey1 = `${configIndex}_${subIndex}`;
+                            const altKey2 = `layout_${configIndex}_${subIndex}`;
+
+                            if (layoutImagesMap.has(altKey1)) {
+                                subConfig.layoutPlanImages = layoutImagesMap.get(altKey1);
+                            } else if (layoutImagesMap.has(altKey2)) {
+                                subConfig.layoutPlanImages = layoutImagesMap.get(altKey2);
+                            }
+                        }
+
+                        if (layoutImagesMapping && layoutImagesMapping[config.unitType]) {
+                            const unitTypeMapping = layoutImagesMapping[config.unitType];
+                            if (unitTypeMapping[subConfig.carpetArea]) {
+                                const mappedImages = Array.isArray(unitTypeMapping[subConfig.carpetArea])
+                                    ? unitTypeMapping[subConfig.carpetArea]
+                                    : [unitTypeMapping[subConfig.carpetArea]];
+                                subConfig.layoutPlanImages = [...subConfig.layoutPlanImages, ...mappedImages];
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -460,25 +526,10 @@ exports.createProperty = async (req, res, next) => {
             uploadedQrImage = await uploadToS3(qrFile, 'properties/rera');
         }
 
-        // Helper function to calculate discount percentage
         const calculateDiscountPercentage = (devPrice, offerPrice) => {
             if (!devPrice || !offerPrice) return "00.00%";
-
-            const parsePriceToNumber = (priceStr) => {
-                if (!priceStr) return 0;
-                let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                const priceStrLower = priceStr.toLowerCase();
-                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                    priceNum = priceNum * 10000000;
-                }
-                return priceNum;
-            };
-
-            const devPriceNum = parsePriceToNumber(devPrice);
-            const offerPriceNum = parsePriceToNumber(offerPrice);
-
+            const devPriceNum = typeof devPrice === 'number' ? devPrice : parsePriceToNumber(devPrice);
+            const offerPriceNum = typeof offerPrice === 'number' ? offerPrice : parsePriceToNumber(offerPrice);
             if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
                 const discount = ((devPriceNum - offerPriceNum) / devPriceNum) * 100;
                 return `${discount.toFixed(2)}%`;
@@ -486,10 +537,8 @@ exports.createProperty = async (req, res, next) => {
             return "00.00%";
         };
 
-        // Calculate discount percentage
         const discountPercentage = calculateDiscountPercentage(developerPrice, offerPrice);
 
-        // ---------- Create Property ----------
         const property = await Property.create({
             projectName,
             developer,
@@ -511,22 +560,18 @@ exports.createProperty = async (req, res, next) => {
             images: uploadedImages,
             highlights,
             amenities,
-            layouts: uploadedLayouts,
             connectivity: connectivityMap.size > 0 ? connectivityMap : new Map(),
             relationshipManager,
             leadDistributionAgents,
             isStatus: isStatus ?? true
         });
 
-        // ---------- Extra Return Data ----------
-        // Optimize queries with lean() and run in parallel
         const [developers, relationshipManagers, agents] = await Promise.all([
             Developer.findOne({ _id: developer }).select("_id name").lean(),
             User.find({ role: projectManagerRole._id }).select("_id name email").lean(),
             User.find({ role: agentRole._id }).select("_id name email").lean()
         ]);
 
-        // ---------- Response ----------
         logInfo('Property created successfully', {
             propertyId: property._id,
             projectName: property.projectName,
@@ -658,21 +703,48 @@ exports.getAllProperties = async (req, res, next) => {
         const enhancedProperties = properties.map((property) => {
             const p = { ...property };
 
-            // Ensure images and layouts are included (even if empty arrays)
+            // Ensure images are included (even if empty array)
             p.images = p.images || [];
-            p.layouts = p.layouts || [];
 
             // Convert connectivity Map to object for JSON response
             p.connectivity = convertConnectivityToObject(p.connectivity);
 
-            // Map layouts with configuration info
-            p.layouts = (p.layouts || []).map((layout) => {
-                const config = (p.configurations || []).find((c) => c.unitType === layout.configurationUnitType);
-                return {
-                    ...layout,
-                    configuration: config || null
-                };
-            });
+            // Ensure configurations have proper structure with subConfigurations
+            if (p.configurations && Array.isArray(p.configurations)) {
+                p.configurations = p.configurations.map((config) => {
+                    if (!config.subConfigurations || !Array.isArray(config.subConfigurations)) {
+                        // Legacy format - convert to new format
+                        // Helper to parse price
+                        const parsePrice = (priceStr) => {
+                            if (!priceStr) return 0;
+                            if (typeof priceStr === 'number') return priceStr;
+                            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+                            const priceStrLower = priceStr.toString().toLowerCase();
+                            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                                priceNum = priceNum * 100000;
+                            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                                priceNum = priceNum * 10000000;
+                            }
+                            return priceNum;
+                        };
+                        return {
+                            unitType: config.unitType || '',
+                            subConfigurations: [{
+                                carpetArea: config.carpetArea || '',
+                                price: parsePrice(config.price),
+                                availabilityStatus: config.availabilityStatus || 'Available',
+                                layoutPlanImages: []
+                            }]
+                        };
+                    }
+                    return config;
+                });
+            } else {
+                p.configurations = [];
+            }
+
+            // Remove old layouts reference (layouts are now in subConfigurations)
+            delete p.layouts;
 
             // Add joined group count
             const propIdStr = property._id.toString();
@@ -706,22 +778,40 @@ exports.getPropertyById = async (req, res, next) => {
         if (!property)
             return res.status(404).json({ success: false, message: 'Property not found' });
 
-        // Convert to plain object
         const p = property.toObject();
 
-        // Convert connectivity Map to object for JSON response
         p.connectivity = convertConnectivityToObject(p.connectivity);
 
-        p.layouts = p.layouts.map((layout) => {
-            const config = p.configurations.find(
-                (c) => c.unitType === layout.configurationUnitType
-            );
-
-            return {
-                ...layout,
-                configuration: config || null
-            };
-        });
+        if (p.configurations && Array.isArray(p.configurations)) {
+            p.configurations = p.configurations.map((config) => {
+                if (!config.subConfigurations || !Array.isArray(config.subConfigurations)) {
+                    const parsePrice = (priceStr) => {
+                        if (!priceStr) return 0;
+                        if (typeof priceStr === 'number') return priceStr;
+                        let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+                        const priceStrLower = priceStr.toString().toLowerCase();
+                        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                            priceNum = priceNum * 100000;
+                        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                            priceNum = priceNum * 10000000;
+                        }
+                        return priceNum;
+                    };
+                    return {
+                        unitType: config.unitType || '',
+                        subConfigurations: [{
+                            carpetArea: config.carpetArea || '',
+                            price: parsePrice(config.price),
+                            availabilityStatus: config.availabilityStatus || 'Available',
+                            layoutPlanImages: []
+                        }]
+                    };
+                }
+                return config;
+            });
+        } else {
+            p.configurations = [];
+        }
 
         res.json({
             success: true,
@@ -745,12 +835,10 @@ exports.updateProperty = async (req, res, next) => {
 
         const updates = {};
 
-        // Update basic fields from req.body
         allowedFields.forEach(field => {
             if (req.body[field] !== undefined) updates[field] = req.body[field];
         });
 
-        // Safe JSON parsing
         const safeJSON = (value, fallback) => {
             try {
                 if (!value) return fallback;
@@ -764,8 +852,35 @@ exports.updateProperty = async (req, res, next) => {
         updates.configurations = safeJSON(req.body.configurations, []);
         updates.highlights = safeJSON(req.body.highlights, []);
         updates.amenities = safeJSON(req.body.amenities, []);
-        updates.layouts = safeJSON(req.body.layouts, []);
-        // Handle connectivity update - convert to Map for dynamic structure
+
+        const layoutImagesMapping = safeJSON(req.body.layoutImagesMapping, {});
+
+        const parsePriceToNumber = (priceStr) => {
+            if (!priceStr) return 0;
+            if (typeof priceStr === 'number') return priceStr;
+            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+            const priceStrLower = priceStr.toString().toLowerCase();
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                priceNum = priceNum * 100000;
+            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                priceNum = priceNum * 10000000;
+            }
+            return priceNum;
+        };
+
+        if (updates.configurations && Array.isArray(updates.configurations)) {
+            for (let configIndex = 0; configIndex < updates.configurations.length; configIndex++) {
+                const config = updates.configurations[configIndex];
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
+                        const subConfig = config.subConfigurations[subIndex];
+                        if (subConfig.price) {
+                            subConfig.price = parsePriceToNumber(subConfig.price);
+                        }
+                    }
+                }
+            }
+        }
         if (req.body.connectivity !== undefined) {
             const connectivityData = safeJSON(req.body.connectivity, {});
             let connectivityMap = new Map();
@@ -780,30 +895,22 @@ exports.updateProperty = async (req, res, next) => {
         }
         updates.leadDistributionAgents = safeJSON(req.body.leadDistributionAgents, []);
 
-        // Calculate discount percentage if developerPrice or offerPrice is being updated
+        if (updates.developerPrice) {
+            updates.developerPrice = parsePriceToNumber(updates.developerPrice);
+        }
+        if (updates.offerPrice) {
+            updates.offerPrice = parsePriceToNumber(updates.offerPrice);
+        }
+
         if (updates.developerPrice || updates.offerPrice) {
             const currentProperty = await Property.findById(req.params.id).select('developerPrice offerPrice').lean();
-            const devPrice = updates.developerPrice || currentProperty?.developerPrice;
-            const offerPrice = updates.offerPrice || currentProperty?.offerPrice;
+            const devPrice = updates.developerPrice !== undefined ? updates.developerPrice : (currentProperty?.developerPrice || 0);
+            const offerPrice = updates.offerPrice !== undefined ? updates.offerPrice : (currentProperty?.offerPrice || 0);
 
             const calculateDiscountPercentage = (devPrice, offerPrice) => {
                 if (!devPrice || !offerPrice) return "00.00%";
-
-                const parsePriceToNumber = (priceStr) => {
-                    if (!priceStr) return 0;
-                    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = priceStr.toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                };
-
-                const devPriceNum = parsePriceToNumber(devPrice);
-                const offerPriceNum = parsePriceToNumber(offerPrice);
-
+                const devPriceNum = typeof devPrice === 'number' ? devPrice : parsePriceToNumber(devPrice);
+                const offerPriceNum = typeof offerPrice === 'number' ? offerPrice : parsePriceToNumber(offerPrice);
                 if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
                     const discount = ((devPriceNum - offerPriceNum) / devPriceNum) * 100;
                     return `${discount.toFixed(2)}%`;
@@ -814,9 +921,6 @@ exports.updateProperty = async (req, res, next) => {
             updates.discountPercentage = calculateDiscountPercentage(devPrice, offerPrice);
         }
 
-        // ---------- Role Validation ----------
-
-        // Relationship Manager
         if (updates.relationshipManager) {
             const projectManagerRole = await Role.findOne({ name: "Project Manager" });
             if (!projectManagerRole) {
@@ -835,7 +939,6 @@ exports.updateProperty = async (req, res, next) => {
             }
         }
 
-        // Lead Distribution Agents
         if (updates.leadDistributionAgents.length > 0) {
             const agentRole = await Role.findOne({ name: "Agent" });
             if (!agentRole) {
@@ -855,8 +958,6 @@ exports.updateProperty = async (req, res, next) => {
             }
         }
 
-        // ---------- File Uploads ----------
-
         let uploadedImages = [];
         let uploadedLayouts = [];
         let uploadedQrImage = null;
@@ -873,24 +974,11 @@ exports.updateProperty = async (req, res, next) => {
             updates.images = uploadedImages;
         }
 
-        if (req.files?.layouts) {
-            const layoutsFromBody = updates.layouts;
-            for (let i = 0; i < req.files.layouts.length; i++) {
-                const url = await uploadToS3(req.files.layouts[i]);
-                uploadedLayouts.push({
-                    image: url,
-                    configurationUnitType: layoutsFromBody[i]?.configurationUnitType || null
-                });
-            }
-            updates.layouts = uploadedLayouts;
-        }
-
         if (req.files?.reraQrImage) {
             uploadedQrImage = await uploadToS3(req.files.reraQrImage[0]);
             updates.reraQrImage = uploadedQrImage;
         }
 
-        // ---------- Update Property ----------
 
         const property = await Property.findByIdAndUpdate(
             req.params.id,
@@ -919,6 +1007,7 @@ exports.updateProperty = async (req, res, next) => {
         next(error);
     }
 };
+
 // ===================== DELETE PROPERTY =====================
 exports.deleteProperty = async (req, res, next) => {
     try {
@@ -955,7 +1044,6 @@ exports.createDeveloper = async (req, res, next) => {
             sourcingManager
         } = req.body;
 
-        // Sourcing manager should be object, not string
         let parsedSourcingManager = sourcingManager;
         if (typeof sourcingManager === 'string') {
             try {
@@ -1004,6 +1092,7 @@ exports.getAllDevelopers = async (req, res, next) => {
 
         const total = await Developer.countDocuments(filters);
         const developers = await Developer.find(filters)
+            .sort({ createdAt: -1 })
             .skip(skip)
             .limit(limit);
 
@@ -1044,12 +1133,10 @@ exports.updateDeveloper = async (req, res, next) => {
 
         const updates = {};
 
-        // If new file is received → upload to S3
         if (req.file) {
             updates.logo = await uploadToS3(req.file);
         }
 
-        // Form-data fields
         allowedFields.forEach(field => {
             if (req.body[field] !== undefined) {
                 if (field === 'sourcingManager') {
@@ -1100,146 +1187,113 @@ exports.deleteDeveloper = async (req, res, next) => {
 
 // LEAD MANAGEMENT SECTION 
 
-// ===================== GET LEAD LIST =====================
-// GET LEADS LIST
 // ===================== GET ALL LEADS =====================
+
 // @desc    Get all leads for logged-in user (filtered by their properties)
 // @route   GET /api/admin/lead_list
 // @access  Private (Admin/Agent)
 exports.getLeadsList = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { dateRange, page = 1, limit = 10 } = req.query;
-
-        // Get properties where user is relationshipManager or leadDistributionAgents
-        const userProperties = await Property.find({
-            $or: [
-                { relationshipManager: userId },
-                { leadDistributionAgents: userId }
-            ],
-            isStatus: true
-        }).select('_id').lean();
-
-        const propertyIds = userProperties.map(p => p._id);
-
-        // Build filter
+        const role = req.user.roleName?.toLowerCase();
+        const { page = 1, limit = 10 } = req.query;
         let filter = { isStatus: true };
 
-        // Filter by user's properties
-        if (propertyIds.length > 0) {
-            filter.propertyId = { $in: propertyIds };
-        } else {
-            // If no properties, return empty results
-            return res.json({
-                success: true,
-                message: "Lead list fetched successfully",
-                data: [],
-                pagination: { total: 0, page: parseInt(page), limit: parseInt(limit), totalPages: 0 }
-            });
+        if (role !== 'admin' && role !== 'super admin') {
+            const properties = await Property.find({
+                isStatus: true,
+                $or: [
+                    { relationshipManager: userId },
+                    { leadDistributionAgents: userId }
+                ]
+            }).select('_id').lean();
+
+            const propertyIds = properties.map(p => p._id);
+
+            if (role === 'project manager') {
+                filter.$or = [
+                    { propertyId: { $in: propertyIds } },
+                    { relationshipManagerId: userId }
+                ];
+            }
+
+            if (role === 'agent') {
+                if (!propertyIds.length) {
+                    return res.json({
+                        success: true,
+                        message: "Lead list fetched successfully",
+                        data: [],
+                        pagination: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }
+                    });
+                }
+                filter.propertyId = { $in: propertyIds };
+            }
         }
 
-        // Date range filter
-        if (dateRange === 'last_month') {
-            const now = new Date();
-            const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            filter.createdAt = { $gte: lastMonth };
-        }
-
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const skip = (page - 1) * limit;
         const total = await leadModal.countDocuments(filter);
 
         const leads = await leadModal.find(filter)
             .populate({
                 path: "propertyId",
-                select: "projectName projectId name location relationshipManager",
-                populate: { path: "relationshipManager", select: "name" }
+                select: "projectName projectId name location configurations images developerPrice offerPrice discountPercentage possessionDate minGroupMembers",
             })
             .populate("userId", "name email phoneNumber countryCode profileImage")
             .populate("relationshipManagerId", "name email phone")
             .sort({ createdAt: -1 })
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(Number(limit))
             .lean();
 
-        // Format status for display
-        const formatStatus = (status) => {
-            const statusMap = {
-                'lead_received': 'Lead Received',
-                'interested': 'Interested',
-                'no_response_dnp': 'No Response - Do Not Pick (DNP)',
-                'unable_to_contact': 'Unable to Contact',
-                'call_back_scheduled': 'Call Back Scheduled',
-                'demo_discussion_ongoing': 'Demo Discussion Ongoing',
-                'site_visit_coordination': 'Site Visit Coordination in Progress',
-                'site_visit_confirmed': 'Site Visit Confirmed',
-                'commercial_negotiation': 'Commercial Negotiation',
-                'deal_closed': 'Deal Closed',
-                'declined_interest': 'Declined Interest',
-                'does_not_meet_requirements': 'Does Not Meet Requirements',
-                'pending': 'Pending',
-                'approved': 'Approved',
-                'rejected': 'Rejected'
-            };
-            return statusMap[status] || status;
-        };
-
-        // Format date (e.g., "2 June, 2025, 02:23 AM")
-        const formatDate = (date) => {
-            const d = new Date(date);
-            const day = d.getDate();
-            const month = d.toLocaleDateString('en-IN', { month: 'long' });
-            const year = d.getFullYear();
-            const time = d.toLocaleTimeString('en-IN', {
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: true
-            });
-            return `${day} ${month}, ${year}, ${time}`;
-        };
-
-        // Format phone number
-        const formatPhone = (user) => {
-            if (!user || !user.phoneNumber) return 'N/A';
-            const countryCode = user.countryCode || '+91';
-            const phoneDigits = user.phoneNumber.replace(/\s/g, '');
-            if (phoneDigits.length === 10) {
-                return `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
-            }
-            return `${countryCode} ${user.phoneNumber}`;
-        };
 
         const formattedData = leads.map(item => {
             const user = item.userId || {};
             const property = item.propertyId || {};
+            const formatDateTime = (date) => {
+                if (!date) return null;
+                const d = new Date(date);
+                const day = d.getDate();
+                const month = d.toLocaleDateString('en-IN', { month: 'long' });
+                const year = d.getFullYear();
+                const time = d.toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                return `${day} ${month}, ${year}, ${time}`;
+            };
+
+            const formatPhone = (user) => {
+                if (!user.phoneNumber) return 'N/A';
+                const countryCode = user.countryCode || '+91';
+                const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+                return phoneDigits.length === 10
+                    ? `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`
+                    : `${countryCode} ${user.phoneNumber}`;
+            };
 
             return {
                 _id: item._id,
-                leadName: user.name || 'N/A',
+                userName: user.name || 'N/A',
+                email: user.email || 'N/A',
                 phoneNumber: formatPhone(user),
-                profileImage: user.profileImage || null,
                 projectId: property.projectId || 'N/A',
-                projectName: property.projectName || property.name || 'N/A (Contact Us)',
-                location: property.location || 'N/A',
-                source: item.source || 'origin',
-                status: formatStatus(item.status || 'lead_received'),
-                statusValue: item.status || 'lead_received',
-                date: formatDate(item.createdAt || item.date),
+                status: item.status || 'lead_received',
+                dateTime: formatDateTime(item.createdAt),
                 createdAt: item.createdAt,
                 updatedAt: item.updatedAt
             };
         });
 
-        logInfo('Lead list fetched', { userId, total, page, limit });
-
         res.json({
             success: true,
             message: "Lead list fetched successfully",
             data: formattedData,
-            pagination: { total, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(total / parseInt(limit)) }
+            pagination: { total, page: Number(page), limit: Number(limit), totalPages: Math.ceil(total / Number(limit)) }
         });
 
     } catch (error) {
-        logError('Error fetching lead list', error, { userId: req.user?.userId });
+        console.error(error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -1275,13 +1329,11 @@ exports.viewLeadDetails = async (req, res) => {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Get timeline activities for this lead
         const timelineActivities = await LeadActivity.find({ leadId: lead._id })
             .populate('performedBy', 'name email phoneNumber countryCode profileImage')
             .sort({ activityDate: -1 })
             .lean();
 
-        // Format timeline activities with proper descriptions
         const formatTimelineDescription = (activity) => {
             const performer = activity.performedBy || {};
             const performerName = activity.performedByName || performer.name || 'Admin';
@@ -1345,8 +1397,6 @@ exports.viewLeadDetails = async (req, res) => {
         };
 
         const formattedTimeline = timelineActivities.map(formatTimelineDescription);
-
-        // Get next follow-up date (if any) - check both scheduleDate and activities
         let nextFollowUp = null;
         if (lead.scheduleDate) {
             const scheduleDate = new Date(lead.scheduleDate);
@@ -1382,7 +1432,19 @@ exports.viewLeadDetails = async (req, res) => {
             }
         }
 
-        // Format property details (null if contact us lead)
+        let followUpNotification = null;
+
+        if (nextFollowUp && nextFollowUp.isOverdue) {
+            const icon = '⚠️';
+
+            followUpNotification = {
+                type: 'FOLLOW_UP_OVERDUE',
+                severity: 'warning',
+                message: `${icon} Next follow-up was scheduled on ${nextFollowUp.formattedDate} and is overdue.`
+            };
+        }
+
+
         const property = lead.propertyId || null;
         const propertyDetails = property ? {
             id: property._id,
@@ -1398,7 +1460,6 @@ exports.viewLeadDetails = async (req, res) => {
             relationshipManager: property.relationshipManager || null
         } : null;
 
-        // Format user details
         const user = lead.userId || {};
         const formatPhone = (user) => {
             if (!user || !user.phoneNumber) return 'N/A';
@@ -1410,7 +1471,6 @@ exports.viewLeadDetails = async (req, res) => {
             return `${countryCode} ${user.phoneNumber}`;
         };
 
-        // Format date (e.g., "2 June, 2025, 02:23 AM")
         const formatDate = (date) => {
             const d = new Date(date);
             const day = d.getDate();
@@ -1432,7 +1492,6 @@ exports.viewLeadDetails = async (req, res) => {
             profileImage: user.profileImage || null
         };
 
-        // Format status
         const formatStatus = (status) => {
             const statusMap = {
                 'lead_received': 'Lead Received',
@@ -1473,7 +1532,8 @@ exports.viewLeadDetails = async (req, res) => {
             createdAt: lead.createdAt,
             updatedAt: lead.updatedAt,
             timeline: formattedTimeline,
-            nextFollowUp: nextFollowUp
+            nextFollowUp: nextFollowUp,
+            followUpNotification: followUpNotification
         };
 
         logInfo('Lead details fetched', { leadId, userId });
@@ -1485,6 +1545,148 @@ exports.viewLeadDetails = async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+exports.exportLeadDetailsCSV = async (req, res) => {
+    try {
+        const { leadId } = req.params;
+
+        const lead = await leadModal.findById(leadId)
+            .populate({
+                path: "propertyId",
+                populate: { path: "relationshipManager", select: "name email phone" }
+            })
+            .populate("userId", "name email phoneNumber countryCode")
+            .populate("relationshipManagerId", "name email phone")
+            .lean();
+
+        if (!lead) {
+            return res.status(404).json({ success: false, message: "Lead not found" });
+        }
+
+        const timeline = await LeadActivity.find({ leadId })
+            .populate("performedBy", "name email")
+            .sort({ activityDate: -1 })
+            .lean();
+
+        const formatPhone = (user) => user?.phoneNumber ? `${user.countryCode || '+91'} ${user.phoneNumber}` : 'N/A';
+
+        const formatDate = (date) => date ? new Date(date).toLocaleString('en-IN') : 'N/A';
+
+        const csvRow = {
+            Lead_ID: lead._id,
+            Lead_Status: lead.status,
+            Lead_Source: lead.source || 'N/A',
+            Created_At: formatDate(lead.createdAt),
+
+            User_Name: lead.userId?.name || 'N/A',
+            User_Email: lead.userId?.email || 'N/A',
+            User_Phone: formatPhone(lead.userId),
+
+            Project_ID: lead.propertyId?.projectId || 'N/A',
+            Project_Name: lead.propertyId?.projectName || 'N/A',
+            Location: lead.propertyId?.location || 'N/A',
+            Possession_Date: formatDate(lead.propertyId?.possessionDate),
+
+            RM_Name: lead.propertyId?.relationshipManager?.name || 'N/A',
+            RM_Email: lead.propertyId?.relationshipManager?.email || 'N/A',
+            RM_Phone: lead.propertyId?.relationshipManager?.phone || 'N/A',
+
+            Amenities: (lead.propertyId?.amenities || []).join(' | '),
+            Configurations: (lead.propertyId?.configurations || []).map(cfg => {
+                if (typeof cfg === 'number') {
+                    if (cfg >= 10000000) return `₹ ${(cfg / 10000000).toFixed(2)} Cr`;
+                    if (cfg >= 100000) return `₹ ${(cfg / 100000).toFixed(2)} Lakh`;
+                    return `₹ ${cfg}`;
+                }
+
+                const bhk = cfg.unitType || cfg.bhk || '';
+                const area = cfg.area || cfg.size || '';
+                const price = cfg.price
+                    ? (cfg.price >= 10000000
+                        ? `₹ ${(cfg.price / 10000000).toFixed(2)} Cr`
+                        : `₹ ${(cfg.price / 100000).toFixed(2)} Lakh`)
+                    : '';
+
+                return [bhk, area, price].filter(Boolean).join(' - ');
+            }).join(' | '),
+
+            Remark: lead.message || '',
+            IP_Address: lead.ipAddress || 'N/A',
+
+            Timeline: JSON.stringify(
+                timeline.map(t => ({
+                    type: t.activityType,
+                    by: t.performedBy?.name || 'System',
+                    date: formatDate(t.activityDate),
+                    oldStatus: t.oldStatus || '',
+                    newStatus: t.newStatus || '',
+                }))
+            )
+        };
+        const fields = Object.keys(csvRow);
+        const parser = new Parser({ fields });
+        const csv = parser.parse([csvRow]);
+        res.header('Content-Type', 'text/csv');
+        res.attachment(`lead_${leadId}_details.csv`);
+        res.send(csv);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// Helper function to create notifications for relevant users
+const createNotification = async (leadId, notificationType, source, sourceId, title, message, metadata = {}) => {
+    try {
+        const lead = await leadModal.findById(leadId)
+            .populate('propertyId', 'relationshipManager leadDistributionAgents projectName projectId')
+            .populate('userId', 'name')
+            .lean();
+
+        if (!lead || !lead.propertyId) {
+            return;
+        }
+
+        const property = lead.propertyId;
+        const leadUser = lead.userId || {};
+
+        const recipients = [];
+
+        if (property.relationshipManager) {
+            recipients.push(property.relationshipManager);
+        }
+
+        if (property.leadDistributionAgents && Array.isArray(property.leadDistributionAgents)) {
+            recipients.push(...property.leadDistributionAgents);
+        }
+
+        const uniqueRecipients = [...new Set(recipients.map(r => r.toString()))];
+
+        const notificationPromises = uniqueRecipients.map(userId => {
+            return Notification.create({
+                userId,
+                leadId,
+                propertyId: property._id,
+                notificationType,
+                title,
+                message,
+                source,
+                sourceId,
+                metadata: {
+                    projectName: property.projectName || 'N/A',
+                    projectId: property.projectId || 'N/A',
+                    leadContactName: leadUser.name || 'N/A',
+                    ...metadata
+                }
+            });
+        });
+
+        await Promise.all(notificationPromises);
+    } catch (error) {
+        logError('Error creating notification', error, { leadId, notificationType });
+    }
+};
+
 // ===================== ADD LEAD TIMELINE ACTIVITY =====================
 // @desc    Add activity to lead timeline (phone call, WhatsApp, follow-up, etc.)
 // @route   POST /api/admin/lead/:leadId/activity
@@ -1496,13 +1698,11 @@ exports.addLeadActivity = async (req, res) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId).populate('userId', 'name').select('_id userId propertyId').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Validate activity type
         const validActivityTypes = ['phone_call', 'whatsapp', 'email', 'visit', 'follow_up', 'join_group', 'status_update', 'remark_update'];
         if (!validActivityTypes.includes(activityType)) {
             return res.status(400).json({
@@ -1511,7 +1711,6 @@ exports.addLeadActivity = async (req, res) => {
             });
         }
 
-        // Prepare activity data
         const activityData = {
             leadId,
             activityType,
@@ -1521,7 +1720,6 @@ exports.addLeadActivity = async (req, res) => {
             metadata: {}
         };
 
-        // Add specific fields based on activity type
         if (activityType === 'follow_up' && nextFollowUpDate) {
             activityData.nextFollowUpDate = new Date(nextFollowUpDate);
         }
@@ -1531,10 +1729,8 @@ exports.addLeadActivity = async (req, res) => {
             if (visitTime) activityData.visitTime = visitTime;
         }
 
-        // Create timeline activity
         const activity = await LeadActivity.create(activityData);
 
-        // If it's a follow-up, update lead's scheduleDate
         if (activityType === 'follow_up' && nextFollowUpDate) {
             await leadModal.updateOne(
                 { _id: leadId },
@@ -1542,7 +1738,6 @@ exports.addLeadActivity = async (req, res) => {
             );
         }
 
-        // If it's a visit, update lead's visitStatus
         if (activityType === 'visit') {
             await leadModal.updateOne(
                 { _id: leadId },
@@ -1550,7 +1745,6 @@ exports.addLeadActivity = async (req, res) => {
             );
         }
 
-        // Create notification based on activity type
         const leadUser = lead?.userId || {};
 
         let notificationTitle = '';
@@ -1634,7 +1828,6 @@ exports.updateLeadStatus = async (req, res) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate status
         const validStatuses = [
             'lead_received',
             'interested',
@@ -1659,7 +1852,6 @@ exports.updateLeadStatus = async (req, res) => {
             });
         }
 
-        // Get current lead
         const lead = await leadModal.findById(leadId).select('status').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
@@ -1667,7 +1859,6 @@ exports.updateLeadStatus = async (req, res) => {
 
         const oldStatus = lead.status;
 
-        // Update lead status
         const updatedLead = await leadModal.findByIdAndUpdate(
             leadId,
             {
@@ -1677,7 +1868,6 @@ exports.updateLeadStatus = async (req, res) => {
             { new: true }
         ).select('status message').lean();
 
-        // Add timeline activity for status update
         await LeadActivity.create({
             leadId,
             activityType: 'status_update',
@@ -1689,7 +1879,6 @@ exports.updateLeadStatus = async (req, res) => {
             metadata: { remark: remark || null }
         });
 
-        // Create notification for status update
         const leadForNotification = await leadModal.findById(leadId).populate('userId', 'name').lean();
         const leadUser = leadForNotification?.userId || {};
 
@@ -1740,7 +1929,6 @@ exports.updateLeadRemark = async (req, res) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Get current lead
         const lead = await leadModal.findById(leadId).select('message').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
@@ -1748,14 +1936,12 @@ exports.updateLeadRemark = async (req, res) => {
 
         const oldRemark = lead.message || '';
 
-        // Update lead remark
         const updatedLead = await leadModal.findByIdAndUpdate(
             leadId,
             { message: remark || '' },
             { new: true }
         ).select('message').lean();
 
-        // Add timeline activity for remark update
         await LeadActivity.create({
             leadId,
             activityType: 'remark_update',
@@ -1796,19 +1982,16 @@ exports.getLeadTimeline = async (req, res) => {
     try {
         const { leadId } = req.params;
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId).select('_id').lean();
         if (!lead) {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Get timeline activities
         const activities = await LeadActivity.find({ leadId })
             .populate('performedBy', 'name email phone profileImage')
             .sort({ activityDate: -1 })
             .lean();
 
-        // Format timeline activities
         const formattedTimeline = activities.map(activity => {
             const performer = activity.performedBy || {};
             return {
@@ -1858,7 +2041,6 @@ exports.getLeadTimeline = async (req, res) => {
 // ===================== DELETE LEAD =====================
 exports.deleteLead = async (req, res) => {
     try {
-        // Admin check
         if (req.user.roleName.toLowerCase() === 'user') {
             return res.status(403).json({ success: false, message: 'Access denied, admin only' });
         }
@@ -1887,8 +2069,6 @@ exports.deleteLead = async (req, res) => {
     }
 };
 
-
-
 exports.getAgentRoles = async (req, res) => {
     try {
         const agentRole = await Role.findOne({ name: "Agent" });
@@ -1904,7 +2084,6 @@ exports.getAgentRoles = async (req, res) => {
     }
 };
 
-
 exports.getRelationshipManagers = async (req, res) => {
     try {
         const project_manager = await Role.findOne({ name: "Project Manager" });
@@ -1919,7 +2098,6 @@ exports.getRelationshipManagers = async (req, res) => {
         res.json({ success: false, message: error.message });
     }
 };
-
 
 // ROLE SECTION 
 
@@ -1953,7 +2131,7 @@ exports.addRole = async (req, res) => {
 // ===================== GET ROLE ===================== 
 exports.getAllRoles = async (req, res) => {
     try {
-        const roles = await Role.find();
+        const roles = await Role.find().sort({ createdAt: -1 });
 
         res.json({
             success: true,
@@ -2039,51 +2217,40 @@ exports.createUser = async (req, res) => {
     try {
         const { name, email, password, phone, role } = req.body;
 
-        // Validate email format
-        if (!email || !email.includes('@')) {
+        if (!name || !email || !password || !phone || !role) {
+            return res.status(400).json({
+                success: false,
+                message: "All fields are required"
+            });
+        }
+
+        const nameParts = name.trim().split(' ');
+        const firstName = nameParts[0];
+        const lastName = nameParts.slice(1).join(' ') || 'NA';
+
+        if (!email.includes('@')) {
             return res.status(400).json({
                 success: false,
                 message: "Invalid email format"
             });
         }
 
-        // Block personal email providers - only allow business/domain emails
         const blockedDomains = [
-            'gmail.com',
-            'yahoo.com',
-            'hotmail.com',
-            'outlook.com',
-            'live.com',
-            'msn.com',
-            'aol.com',
-            'icloud.com',
-            'mail.com',
-            'protonmail.com',
-            'yandex.com',
-            'zoho.com',
-            'rediffmail.com',
-            'inbox.com',
-            'gmx.com'
+            'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+            'live.com', 'msn.com', 'aol.com', 'icloud.com', 'mail.com',
+            'protonmail.com', 'yandex.com', 'zoho.com', 'rediffmail.com',
+            'inbox.com', 'gmx.com'
         ];
 
         const emailDomain = email.split('@')[1]?.toLowerCase().trim();
-        if (!emailDomain) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid email format"
-            });
-        }
-
-        // Check if email is from blocked personal email provider
         if (blockedDomains.includes(emailDomain)) {
             return res.status(400).json({
                 success: false,
-                message: "Personal email addresses are not allowed. Please use a business/domain email address."
+                message: "Personal email addresses are not allowed."
             });
         }
 
-        // Check existing user
-        const exists = await User.findOne({ email }).select('email').lean();
+        const exists = await User.findOne({ email: email.toLowerCase() }).lean();
         if (exists) {
             return res.status(400).json({
                 success: false,
@@ -2091,8 +2258,7 @@ exports.createUser = async (req, res) => {
             });
         }
 
-        // Check valid role
-        const roleExists = await Role.findById(role).select('_id name').lean();
+        const roleExists = await Role.findById(role).lean();
         if (!roleExists) {
             return res.status(400).json({
                 success: false,
@@ -2100,44 +2266,45 @@ exports.createUser = async (req, res) => {
             });
         }
 
-        // Create user
         const user = await User.create({
-            name,
+            firstName,
+            lastName,
             email: email.toLowerCase().trim(),
             password,
-            phone,
+            phoneNumber: phone,
+            countryCode: '+91',
             role
         });
 
-        // Populate role for response
+        const smsResult = await sendPasswordSMS(
+            phone,
+            '+91',
+            password,
+            `${user.firstName} ${user.lastName}`
+        );
+
+        if (!smsResult.success) {
+            console.error('❌ SMS failed:', smsResult.error);
+        }
+
         await user.populate('role', 'name permissions');
 
-        logInfo('User created by admin', {
-            userId: user._id,
-            email: user.email,
-            role: roleExists.name,
-            createdBy: req.user?.userId
-        });
-
-        res.status(201).json({
+        return res.status(201).json({
             success: true,
-            message: "User created successfully",
+            message: "User created successfully & password sent via SMS",
             data: {
                 _id: user._id,
-                name: user.name,
+                name: `${user.firstName} ${user.lastName}`,
                 email: user.email,
-                phone: user.phone,
+                phone: user.phoneNumber,
                 role: user.role,
                 createdAt: user.createdAt
             }
         });
 
     } catch (error) {
-        logError('Error creating user', error, {
-            email: req.body.email,
-            createdBy: req.user?.userId
-        });
-        res.status(500).json({
+        console.error('Create user error:', error);
+        return res.status(500).json({
             success: false,
             message: error.message || "Error creating user"
         });
@@ -2147,6 +2314,7 @@ exports.createUser = async (req, res) => {
 exports.getAllAssignUsers = async (req, res) => {
     try {
         const users = await User.find()
+            .sort({ createdAt: -1 })
             .select('-password')
             .populate('role', 'name');
 
@@ -2182,9 +2350,7 @@ exports.updateAssignUser = async (req, res) => {
     try {
         const { name, email, phone, role } = req.body;
 
-        // Domain email validation if email is being updated
         if (email) {
-            // Validate email format
             if (!email.includes('@')) {
                 return res.status(400).json({
                     success: false,
@@ -2192,7 +2358,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Block personal email providers - only allow business/domain emails
             const blockedDomains = [
                 'gmail.com',
                 'yahoo.com',
@@ -2219,7 +2384,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Check if email is from blocked personal email provider
             if (blockedDomains.includes(emailDomain)) {
                 return res.status(400).json({
                     success: false,
@@ -2227,7 +2391,6 @@ exports.updateAssignUser = async (req, res) => {
                 });
             }
 
-            // Check if email already exists (excluding current user)
             const existingUser = await User.findOne({
                 email: email.toLowerCase().trim(),
                 _id: { $ne: req.params.id }
@@ -2241,7 +2404,6 @@ exports.updateAssignUser = async (req, res) => {
             }
         }
 
-        // check role if provided
         if (role) {
             const roleExists = await Role.findById(role).select('_id name').lean();
             if (!roleExists) {
@@ -2252,7 +2414,6 @@ exports.updateAssignUser = async (req, res) => {
             }
         }
 
-        // Prepare update object
         const updates = {};
         if (name) updates.name = name;
         if (email) updates.email = email.toLowerCase().trim();
@@ -2317,12 +2478,10 @@ exports.deleteAssignUser = async (req, res) => {
 // ADMIN DASHBOARD SECTION 
 exports.getAdminDashboard = async (req, res, next) => {
     try {
-        // Get current month start and end dates for bookings
         const now = new Date();
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
         const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-        // Dashboard Overview Cards - Run in parallel for better performance
         const [
             totalDevelopers,
             liveProjects,
@@ -2339,7 +2498,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             })
         ]);
 
-        // Recent Leads (last 5-10 leads)
         const recentLeads = await leadModal.find({ isStatus: true })
             .populate({
                 path: 'userId',
@@ -2353,12 +2511,10 @@ exports.getAdminDashboard = async (req, res, next) => {
             .limit(10)
             .lean();
 
-        // Format recent leads
         const formattedRecentLeads = recentLeads.map(lead => {
             const property = lead.propertyId || {};
             const user = lead.userId || {};
 
-            // Get property price (use developerPrice or offerPrice)
             const priceStr = property.developerPrice || property.offerPrice || '0';
             let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
             const priceStrLower = priceStr.toLowerCase();
@@ -2391,7 +2547,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             };
         });
 
-        // Top Performing Projects (based on lead count)
         const topProjects = await leadModal.aggregate([
             { $match: { isStatus: true } },
             {
@@ -2431,7 +2586,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             }
         ]);
 
-        // Format top projects
         const formattedTopProjects = topProjects.map(project => ({
             id: project._id,
             projectName: project.projectName || 'N/A',
@@ -2441,7 +2595,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             newLeadsFormatted: `${project.newLeads || 0} New Leads`
         }));
 
-        // Sales Team Performance (Users with Agent or Project Manager role)
         const agentRole = await Role.findOne({ name: 'Agent' }).select('_id').lean();
         const projectManagerRole = await Role.findOne({ name: 'Project Manager' }).select('_id').lean();
 
@@ -2455,9 +2608,7 @@ exports.getAdminDashboard = async (req, res, next) => {
             .limit(10)
             .lean();
 
-        // Get lead stats for each sales team member
         const salesTeamPerformance = await Promise.all(salesTeamMembers.map(async (member) => {
-            // Get leads assigned to this member (as relationshipManager or leadDistributionAgent)
             const totalLeads = await leadModal.countDocuments({
                 $or: [
                     { relationshipManagerId: member._id },
@@ -2466,7 +2617,6 @@ exports.getAdminDashboard = async (req, res, next) => {
                 isStatus: true
             });
 
-            // Get contacted leads (leads with visitStatus 'visited' or 'follow_up')
             const contactedLeads = await leadModal.countDocuments({
                 $or: [
                     { relationshipManagerId: member._id },
@@ -2476,14 +2626,11 @@ exports.getAdminDashboard = async (req, res, next) => {
                 visitStatus: { $in: ['visited', 'follow_up'] }
             });
 
-            // Calculate lead contacted percentage
             const leadContactedPercentage = totalLeads > 0
                 ? Math.round((contactedLeads / totalLeads) * 100)
                 : 0;
 
-            // Calculate average response time (simplified - using lead creation to first contact)
-            // For now, we'll use a default or calculate from lead dates
-            const responseTime = '6H'; // Can be enhanced with actual calculation
+            const responseTime = '6H';
 
             return {
                 userId: member._id,
@@ -2496,9 +2643,6 @@ exports.getAdminDashboard = async (req, res, next) => {
             };
         }));
 
-        // Group-Buy Progress
-        // Target Units: Total configurations across all properties
-        // Confirmed Units: Configurations with availabilityStatus 'Sold' or 'Reserved'
         const allProperties = await Property.find({ isStatus: true })
             .select('configurations')
             .lean();
@@ -2528,20 +2672,15 @@ exports.getAdminDashboard = async (req, res, next) => {
             success: true,
             message: 'Admin dashboard data fetched successfully',
             data: {
-                // Overview Cards
                 overview: {
                     totalDevelopers,
                     liveProjects,
                     totalLeads,
                     totalBookingsThisMonth
                 },
-                // Recent Leads
                 recentLeads: formattedRecentLeads,
-                // Top Performing Projects
                 topPerformingProjects: formattedTopProjects,
-                // Sales Team Performance
                 salesTeamPerformance: salesTeamPerformance,
-                // Group-Buy Progress
                 groupBuyProgress: {
                     targetUnits,
                     confirmedUnits,
@@ -2610,12 +2749,10 @@ exports.getFilteredLeads = async (req, res) => {
 
         const filter = {};
 
-        // 🔐 Role based
         if (req.user.roleName?.toLowerCase() === 'user') {
             filter.userId = req.user.userId;
         }
 
-        // 📅 Date filters
         const start = new Date();
         const end = new Date();
 
@@ -2651,7 +2788,7 @@ exports.getFilteredLeads = async (req, res) => {
                 populate: { path: "relationshipManager", select: "name" }
             })
             .populate("userId", "name email phone")
-            .sort({ createdAt: -1 }) // 🔥 latest first
+            .sort({ createdAt: -1 }) 
             .skip(skip)
             .limit(parseInt(limit));
 
@@ -2698,7 +2835,6 @@ exports.getCRMDashboard = async (req, res, next) => {
             limit = 10
         } = req.query;
 
-        // Step 1: Get properties where user is relationshipManager or leadDistributionAgents
         const userProperties = await Property.find({
             $or: [
                 { relationshipManager: userId },
@@ -2709,7 +2845,6 @@ exports.getCRMDashboard = async (req, res, next) => {
 
         const propertyIds = userProperties.map(p => p._id);
 
-        // Step 2: Build date filter based on dateRange
         const now = new Date();
         let dateFilter = {};
 
@@ -2724,13 +2859,11 @@ exports.getCRMDashboard = async (req, res, next) => {
             dateFilter.createdAt = { $gte: startDate };
         }
 
-        // Step 3: Build lead filter (only leads for user's properties)
         const leadFilter = {
             isStatus: true,
             ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
         };
 
-        // If no properties found, return empty results
         if (propertyIds.length === 0) {
             return res.json({
                 success: true,
@@ -2754,30 +2887,24 @@ exports.getCRMDashboard = async (req, res, next) => {
             });
         }
 
-        // Step 4: Calculate KPIs in parallel
         const [totalLeads, contactedLeads, allLeadsForResponseTime] = await Promise.all([
-            // Total leads received (in date range)
             leadModal.countDocuments({
                 ...leadFilter,
                 ...dateFilter
             }),
-            // Leads contacted (have visitStatus 'visited' or 'follow_up')
             leadModal.countDocuments({
                 ...leadFilter,
                 ...dateFilter,
                 visitStatus: { $in: ['visited', 'follow_up'] }
             }),
-            // All leads for response time calculation
             leadModal.find({
                 ...leadFilter,
                 ...dateFilter
             }).select('createdAt relationshipManagerId').lean()
         ]);
 
-        // Calculate response time (average time from lead creation to first contact)
         let avgResponseTimeHours = 0;
         if (contactedLeads > 0) {
-            // Get first contact activity for contacted leads
             const contactedLeadIds = await leadModal.find({
                 ...leadFilter,
                 ...dateFilter,
@@ -2802,7 +2929,6 @@ exports.getCRMDashboard = async (req, res, next) => {
                     }
                 ]);
 
-                // Calculate average response time
                 let totalResponseTime = 0;
                 let count = 0;
 
@@ -2826,13 +2952,11 @@ exports.getCRMDashboard = async (req, res, next) => {
             ? Math.round((contactedLeads / totalLeads) * 100)
             : 0;
 
-        // Step 5: Get Today's Follow Ups
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // Get leads with follow-up activities scheduled for today
         const followUpActivities = await LeadActivity.find({
             activityType: 'follow_up',
             nextFollowUpDate: {
@@ -2860,7 +2984,6 @@ exports.getCRMDashboard = async (req, res, next) => {
             .sort({ nextFollowUpDate: 1 })
             .lean();
 
-        // Filter out null leads (from populate match)
         const todaysFollowUps = followUpActivities
             .filter(activity => activity.leadId !== null)
             .map(activity => {
@@ -2868,7 +2991,6 @@ exports.getCRMDashboard = async (req, res, next) => {
                 const user = lead.userId || {};
                 const property = lead.propertyId || {};
 
-                // Format date (e.g., "2 June, 2025, 02:23 AM")
                 const followUpDate = new Date(activity.nextFollowUpDate);
                 const day = followUpDate.getDate();
                 const month = followUpDate.toLocaleDateString('en-IN', { month: 'long' });
@@ -2880,17 +3002,14 @@ exports.getCRMDashboard = async (req, res, next) => {
                 });
                 const formattedDate = `${day} ${month}, ${year}, ${time}`;
 
-                // Format source (e.g., "Mumbai - Landing.")
                 let formattedSource = lead.source || 'origin';
                 if (property.location) {
                     formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
                 }
 
-                // Format phone number (e.g., "+91 956 256 2648")
                 let formattedPhone = 'N/A';
                 if (user.phoneNumber) {
                     const countryCode = user.countryCode || '+91';
-                    // Format phone number with spaces (e.g., "956 256 2648")
                     const phoneDigits = user.phoneNumber.replace(/\s/g, '');
                     if (phoneDigits.length === 10) {
                         formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
@@ -2918,20 +3037,16 @@ exports.getCRMDashboard = async (req, res, next) => {
                 };
             });
 
-        // Step 6: Get leads list with sorting and pagination
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // Get total count for pagination
         const totalLeadsCount = await leadModal.countDocuments({
             ...leadFilter,
             ...dateFilter
         });
 
-        // Get leads - use aggregation for name sorting, regular query for date sorting
         let leads = [];
 
         if (sortBy === 'name_asc' || sortBy === 'name_desc') {
-            // Use aggregation for name-based sorting
             const sortOrder = sortBy === 'name_asc' ? 1 : -1;
 
             const leadsAggregation = await leadModal.aggregate([
@@ -2964,7 +3079,6 @@ exports.getCRMDashboard = async (req, res, next) => {
                 { $unwind: { path: '$property', preserveNullAndEmptyArrays: true } }
             ]);
 
-            // Format aggregation results
             leads = leadsAggregation.map(item => ({
                 _id: item._id,
                 userId: item.user || null,
@@ -2977,14 +3091,13 @@ exports.getCRMDashboard = async (req, res, next) => {
                 updatedAt: item.updatedAt
             }));
         } else {
-            // Use regular query for date-based sorting
             let sortCriteria = {};
             if (sortBy === 'newest_first') {
                 sortCriteria = { createdAt: -1 };
             } else if (sortBy === 'oldest_first') {
                 sortCriteria = { createdAt: 1 };
             } else {
-                sortCriteria = { createdAt: -1 }; // Default
+                sortCriteria = { createdAt: -1 }; 
             }
 
             leads = await leadModal.find({
@@ -3005,12 +3118,10 @@ exports.getCRMDashboard = async (req, res, next) => {
                 .lean();
         }
 
-        // Format leads for response
         const formattedLeads = leads.map(lead => {
             const user = lead.userId || {};
             const property = lead.propertyId || {};
 
-            // Format date (e.g., "2 June, 2025, 02:23 AM")
             const leadDate = new Date(lead.createdAt || lead.date);
             const day = leadDate.getDate();
             const month = leadDate.toLocaleDateString('en-IN', { month: 'long' });
@@ -3022,17 +3133,14 @@ exports.getCRMDashboard = async (req, res, next) => {
             });
             const formattedDate = `${day} ${month}, ${year}, ${time}`;
 
-            // Format source (e.g., "Mumbai - Landing.")
             let formattedSource = lead.source || 'origin';
             if (property.location) {
                 formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
             }
 
-            // Format phone number (e.g., "+91 956 256 2648")
             let formattedPhone = 'N/A';
             if (user.phoneNumber) {
                 const countryCode = user.countryCode || '+91';
-                // Format phone number with spaces (e.g., "956 256 2648")
                 const phoneDigits = user.phoneNumber.replace(/\s/g, '');
                 if (phoneDigits.length === 10) {
                     formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
@@ -3101,7 +3209,6 @@ exports.getNotifications = async (req, res, next) => {
     try {
         const userId = req.user.userId;
 
-        // Get properties where user is relationshipManager or leadDistributionAgents
         const userProperties = await Property.find({
             $or: [
                 { relationshipManager: userId },
@@ -3112,13 +3219,11 @@ exports.getNotifications = async (req, res, next) => {
 
         const propertyIds = userProperties.map(p => p._id);
 
-        // Build filter - only notifications for user's properties
         const filter = {
             userId,
             ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
         };
 
-        // If no properties found, return empty results
         if (propertyIds.length === 0) {
             return res.json({
                 success: true,
@@ -3127,7 +3232,6 @@ exports.getNotifications = async (req, res, next) => {
             });
         }
 
-        // Get all notifications for user
         const notifications = await Notification.find(filter)
             .populate({
                 path: 'leadId',
@@ -3148,7 +3252,6 @@ exports.getNotifications = async (req, res, next) => {
             .sort({ createdAt: -1 })
             .lean();
 
-        // Helper function to get date label (Today, Yesterday, or formatted date)
         const getDateLabel = (date) => {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
@@ -3172,7 +3275,6 @@ exports.getNotifications = async (req, res, next) => {
             }
         };
 
-        // Group notifications by date label
         const grouped = {};
 
         for (const notification of notifications) {
@@ -3182,7 +3284,6 @@ exports.getNotifications = async (req, res, next) => {
                 grouped[dateLabel] = [];
             }
 
-            // Calculate "X hours ago" or "X days ago"
             const now = new Date();
             const notificationTime = new Date(notification.createdAt);
             const diffMs = now - notificationTime;
@@ -3199,12 +3300,10 @@ exports.getNotifications = async (req, res, next) => {
                 timeAgo = `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
             }
 
-            // Format notification based on type
             let formattedMessage = notification.message;
             let formattedTitle = notification.title;
 
             if (notification.notificationType === 'follow_up') {
-                // Format follow-up reminder message
                 const property = notification.propertyId || {};
                 const nextFollowUpDate = notification.metadata?.nextFollowUpDate;
 
@@ -3236,16 +3335,14 @@ exports.getNotifications = async (req, res, next) => {
             });
         }
 
-        // Sort date labels: Today first, then Yesterday, then others in descending order
         const sortedLabels = Object.keys(grouped).sort((a, b) => {
             if (a === 'Today') return -1;
             if (b === 'Today') return 1;
             if (a === 'Yesterday') return -1;
             if (b === 'Yesterday') return 1;
-            return b.localeCompare(a); // Descending for other dates
+            return b.localeCompare(a); 
         });
 
-        // Format final response
         const formattedData = sortedLabels.map(label => ({
             dateLabel: label,
             notifications: grouped[label]
@@ -3277,7 +3374,6 @@ exports.markAllNotificationsAsRead = async (req, res, next) => {
     try {
         const userId = req.user.userId;
 
-        // Get properties where user is relationshipManager or leadDistributionAgents
         const userProperties = await Property.find({
             $or: [
                 { relationshipManager: userId },
@@ -3288,14 +3384,12 @@ exports.markAllNotificationsAsRead = async (req, res, next) => {
 
         const propertyIds = userProperties.map(p => p._id);
 
-        // Build filter - only notifications for user's properties
         const filter = {
             userId,
             isRead: false,
             ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
         };
 
-        // Update all unread notifications
         const result = await Notification.updateMany(
             filter,
             { isRead: true }
@@ -3331,7 +3425,6 @@ exports.scheduleFollowUp = async (req, res, next) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId)
             .populate('propertyId', 'projectName projectId')
             .populate('userId', 'name')
@@ -3341,7 +3434,6 @@ exports.scheduleFollowUp = async (req, res, next) => {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Parse follow-up date
         let parsedFollowUpDate = null;
         if (followUpDate) {
             parsedFollowUpDate = new Date(followUpDate);
@@ -3349,21 +3441,18 @@ exports.scheduleFollowUp = async (req, res, next) => {
                 return res.status(400).json({ success: false, message: "Invalid follow-up date format" });
             }
 
-            // If time is provided, add it to the date
             if (followUpTime) {
                 const [hours, minutes] = followUpTime.split(':');
                 parsedFollowUpDate.setHours(parseInt(hours) || 0, parseInt(minutes) || 0, 0, 0);
             }
         }
 
-        // Update lead's scheduleDate (set to null if no follow-up date provided)
         await leadModal.findByIdAndUpdate(
             leadId,
             { scheduleDate: parsedFollowUpDate || null },
             { new: true }
         );
 
-        // Create timeline activity
         const activityDescription = parsedFollowUpDate
             ? `Follow up scheduled for ${parsedFollowUpDate.toLocaleDateString('en-IN', {
                 day: 'numeric',
@@ -3387,7 +3476,6 @@ exports.scheduleFollowUp = async (req, res, next) => {
             }
         });
 
-        // Create notification
         const property = lead.propertyId || {};
         const leadUser = lead.userId || {};
 
@@ -3448,7 +3536,6 @@ exports.callNow = async (req, res, next) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId)
             .populate('userId', 'name')
             .lean();
@@ -3457,7 +3544,6 @@ exports.callNow = async (req, res, next) => {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Create timeline activity
         const leadUser = lead.userId || {};
         const activityDescription = `Phone call made to ${leadUser.name || 'lead'}${description ? `. ${description}` : ''}`;
 
@@ -3472,7 +3558,6 @@ exports.callNow = async (req, res, next) => {
             }
         });
 
-        // Create notification
         await createNotification(
             leadId,
             'phone_call',
@@ -3521,7 +3606,6 @@ exports.sendWhatsApp = async (req, res, next) => {
         const performedBy = req.user.userId;
         const performedByName = req.user.name || 'Admin';
 
-        // Validate lead exists
         const lead = await leadModal.findById(leadId)
             .populate('userId', 'name')
             .lean();
@@ -3530,7 +3614,6 @@ exports.sendWhatsApp = async (req, res, next) => {
             return res.status(404).json({ success: false, message: "Lead not found" });
         }
 
-        // Create timeline activity
         const leadUser = lead.userId || {};
         const activityDescription = `WhatsApp message sent to ${leadUser.name || 'lead'}${description ? `. ${description}` : ''}`;
 
@@ -3545,7 +3628,6 @@ exports.sendWhatsApp = async (req, res, next) => {
             }
         });
 
-        // Create notification
         await createNotification(
             leadId,
             'whatsapp',
@@ -3600,7 +3682,6 @@ exports.getCRMProfile = async (req, res, next) => {
             return res.status(404).json({ success: false, message: "User not found" });
         }
 
-        // Format response
         const profileData = {
             _id: user._id,
             firstName: user.firstName || '',
@@ -3652,13 +3733,11 @@ exports.updateCRMProfile = async (req, res, next) => {
             country
         } = req.body;
 
-        // Get current user
         const currentUser = await User.findById(userId).select('email phoneNumber').lean();
         if (!currentUser) {
             return res.status(404).json({ success: false, message: "User not found" });
         }
 
-        // Prepare update data
         const updates = {};
 
         if (firstName) updates.firstName = firstName.trim();
@@ -3668,7 +3747,6 @@ exports.updateCRMProfile = async (req, res, next) => {
         if (state) updates.state = state.trim();
         if (country) updates.country = country.trim();
 
-        // Email update with duplicate check
         if (email && email !== currentUser.email) {
             const emailExists = await User.findOne({ email: email.toLowerCase().trim() });
             if (emailExists) {
@@ -3680,7 +3758,6 @@ exports.updateCRMProfile = async (req, res, next) => {
             updates.email = email.toLowerCase().trim();
         }
 
-        // Phone number update with validation
         if (phoneNumber) {
             const phoneRegex = /^[0-9]{10}$/;
             if (!phoneRegex.test(phoneNumber)) {
@@ -3692,12 +3769,10 @@ exports.updateCRMProfile = async (req, res, next) => {
             updates.phoneNumber = phoneNumber;
         }
 
-        // Country code update
         if (countryCode) {
             updates.countryCode = countryCode.trim();
         }
 
-        // Handle profile image upload
         if (req.file) {
             try {
                 const profileImage = await uploadToS3(req.file, 'users/profile');
@@ -3710,11 +3785,9 @@ exports.updateCRMProfile = async (req, res, next) => {
                 });
             }
         } else if (req.body.profileImage) {
-            // If profileImage is provided as URL string
             updates.profileImage = req.body.profileImage;
         }
 
-        // Update user
         const updatedUser = await User.findByIdAndUpdate(
             userId,
             updates,
@@ -3724,7 +3797,6 @@ exports.updateCRMProfile = async (req, res, next) => {
             .populate('role', 'name roleName')
             .lean();
 
-        // Format response
         const profileData = {
             _id: updatedUser._id,
             firstName: updatedUser.firstName || '',
@@ -3753,6 +3825,373 @@ exports.updateCRMProfile = async (req, res, next) => {
 
     } catch (error) {
         logError('Error updating CRM profile', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== BLOG MANAGEMENT SECTION =====================
+
+// ===================== CREATE BLOG =====================
+// @desc    Create a new blog post
+// @route   POST /api/admin/blog
+// @access  Private (Admin)
+exports.createBlog = async (req, res, next) => {
+    try {
+        const {
+            title,
+            subtitle,
+            category,
+            tags,
+            content,
+            isPublished
+        } = req.body;
+
+        const author = req.user.userId;
+        const authorName = req.user.name || 'Admin';
+
+        if (!title || !content) {
+            return res.status(400).json({
+                success: false,
+                message: 'Title and content are required'
+            });
+        }
+
+        let tagsArray = [];
+        if (tags) {
+            if (typeof tags === 'string') {
+                try {
+                    tagsArray = JSON.parse(tags);
+                } catch {
+                    tagsArray = tags.split(',').map(tag => tag.trim()).filter(tag => tag);
+                }
+            } else if (Array.isArray(tags)) {
+                tagsArray = tags;
+            }
+        }
+
+        let bannerImageUrl = null;
+        if (req.files?.bannerImage && req.files.bannerImage[0]) {
+            try {
+                bannerImageUrl = await uploadToS3(req.files.bannerImage[0], 'blogs/banner');
+            } catch (uploadError) {
+                logError('Error uploading banner image', uploadError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload banner image'
+                });
+            }
+        } else if (req.body.bannerImage) {
+            bannerImageUrl = req.body.bannerImage;
+        }
+
+        let galleryImageUrls = [];
+        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
+            try {
+                const uploadPromises = req.files.galleryImages.map(file =>
+                    uploadToS3(file, 'blogs/gallery')
+                );
+                galleryImageUrls = await Promise.all(uploadPromises);
+            } catch (uploadError) {
+                logError('Error uploading gallery images', uploadError);
+            }
+        } else if (req.body.galleryImages) {
+            const galleryImagesData = typeof req.body.galleryImages === 'string'
+                ? JSON.parse(req.body.galleryImages)
+                : req.body.galleryImages;
+            if (Array.isArray(galleryImagesData)) {
+                galleryImageUrls = galleryImagesData;
+            }
+        }
+
+        const slug = title
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/(^-|-$)/g, '');
+
+        let finalSlug = slug;
+        const existingBlog = await Blog.findOne({ slug: finalSlug }).lean();
+        if (existingBlog) {
+            finalSlug = `${slug}-${Date.now()}`;
+        }
+
+        const blog = await Blog.create({
+            title,
+            subtitle: subtitle || '',
+            category: category || '',
+            author,
+            authorName,
+            tags: tagsArray,
+            bannerImage: bannerImageUrl,
+            galleryImages: galleryImageUrls,
+            content,
+            slug: finalSlug,
+            isPublished: isPublished === 'true' || isPublished === true
+        });
+
+        logInfo('Blog created successfully', {
+            blogId: blog._id,
+            title: blog.title,
+            author
+        });
+
+        res.status(201).json({
+            success: true,
+            message: 'Blog created successfully',
+            data: {
+                blog
+            }
+        });
+
+    } catch (error) {
+        logError('Error creating blog', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET ALL BLOGS (Admin) =====================
+// @desc    Get all blogs for admin with search and pagination
+// @route   GET /api/admin/blogs
+// @access  Private (Admin)
+exports.getAllBlogs = async (req, res, next) => {
+    try {
+        const { search, page = 1, limit = 10 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const filter = { isStatus: true };
+
+        if (search) {
+            filter.$or = [
+                { title: { $regex: search, $options: 'i' } },
+                { authorName: { $regex: search, $options: 'i' } },
+                { category: { $regex: search, $options: 'i' } },
+                { tags: { $in: [new RegExp(search, 'i')] } }
+            ];
+        }
+
+        const total = await Blog.countDocuments(filter);
+
+        const blogs = await Blog.find(filter)
+            .populate('author', 'name email profileImage')
+            .sort({ createdAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .lean();
+
+        const formattedBlogs = blogs.map(blog => ({
+            _id: blog._id,
+            title: blog.title,
+            subtitle: blog.subtitle || '',
+            category: blog.category || '',
+            author: blog.authorName || blog.author?.name || 'Admin',
+            authorId: blog.author?._id || blog.author,
+            tags: blog.tags || [],
+            bannerImage: blog.bannerImage || null,
+            date: new Date(blog.createdAt).toLocaleDateString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric'
+            }),
+            isPublished: blog.isPublished,
+            views: blog.views || 0,
+            createdAt: blog.createdAt,
+            updatedAt: blog.updatedAt
+        }));
+
+        logInfo('Blogs fetched for admin', { total, page, limit });
+
+        res.json({
+            success: true,
+            message: 'Blogs fetched successfully',
+            data: formattedBlogs,
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
+
+    } catch (error) {
+        logError('Error fetching blogs', error, { userId: req.user?.userId });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET BLOG BY ID (Admin) =====================
+// @desc    Get single blog by ID for admin
+// @route   GET /api/admin/blog/:id
+// @access  Private (Admin)
+exports.getBlogById = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+
+        const blog = await Blog.findById(id)
+            .populate('author', 'name email profileImage')
+            .lean();
+
+        if (!blog) {
+            return res.status(404).json({
+                success: false,
+                message: 'Blog not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Blog fetched successfully',
+            data: blog
+        });
+
+    } catch (error) {
+        logError('Error fetching blog', error, { blogId: req.params.id });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== UPDATE BLOG =====================
+// @desc    Update a blog post
+// @route   PUT /api/admin/blog/:id
+// @access  Private (Admin)
+exports.updateBlog = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const {
+            title,
+            subtitle,
+            category,
+            tags,
+            content,
+            isPublished
+        } = req.body;
+
+        const existingBlog = await Blog.findById(id);
+        if (!existingBlog) {
+            return res.status(404).json({
+                success: false,
+                message: 'Blog not found'
+            });
+        }
+
+        const updates = {};
+
+        if (title) {
+            updates.title = title;
+            const slug = title
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/(^-|-$)/g, '');
+
+            const slugExists = await Blog.findOne({ slug, _id: { $ne: id } }).lean();
+            updates.slug = slugExists ? `${slug}-${Date.now()}` : slug;
+        }
+
+        if (subtitle !== undefined) updates.subtitle = subtitle;
+        if (category !== undefined) updates.category = category;
+        if (content !== undefined) updates.content = content;
+        if (isPublished !== undefined) {
+            updates.isPublished = isPublished === 'true' || isPublished === true;
+        }
+
+        if (tags !== undefined) {
+            let tagsArray = [];
+            if (typeof tags === 'string') {
+                try {
+                    tagsArray = JSON.parse(tags);
+                } catch {
+                    tagsArray = tags.split(',').map(tag => tag.trim()).filter(tag => tag);
+                }
+            } else if (Array.isArray(tags)) {
+                tagsArray = tags;
+            }
+            updates.tags = tagsArray;
+        }
+
+        if (req.files?.bannerImage && req.files.bannerImage[0]) {
+            try {
+                updates.bannerImage = await uploadToS3(req.files.bannerImage[0], 'blogs/banner');
+            } catch (uploadError) {
+                logError('Error uploading banner image', uploadError);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to upload banner image'
+                });
+            }
+        } else if (req.body.bannerImage !== undefined) {
+            updates.bannerImage = req.body.bannerImage || null;
+        }
+
+        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
+            try {
+                const uploadPromises = req.files.galleryImages.map(file =>
+                    uploadToS3(file, 'blogs/gallery')
+                );
+                const newGalleryImages = await Promise.all(uploadPromises);
+                updates.galleryImages = [...(existingBlog.galleryImages || []), ...newGalleryImages];
+            } catch (uploadError) {
+                logError('Error uploading gallery images', uploadError);
+            }
+        } else if (req.body.galleryImages !== undefined) {
+            const galleryImagesData = typeof req.body.galleryImages === 'string'
+                ? JSON.parse(req.body.galleryImages)
+                : req.body.galleryImages;
+            if (Array.isArray(galleryImagesData)) {
+                updates.galleryImages = galleryImagesData;
+            }
+        }
+
+        const updatedBlog = await Blog.findByIdAndUpdate(
+            id,
+            updates,
+            { new: true, runValidators: true }
+        )
+            .populate('author', 'name email profileImage')
+            .lean();
+
+        logInfo('Blog updated successfully', {
+            blogId: id,
+            updatedFields: Object.keys(updates)
+        });
+
+        res.json({
+            success: true,
+            message: 'Blog updated successfully',
+            data: updatedBlog
+        });
+
+    } catch (error) {
+        logError('Error updating blog', error, { blogId: req.params.id });
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== DELETE BLOG =====================
+// @desc    Delete a blog post (soft delete)
+// @route   DELETE /api/admin/blog/:id
+// @access  Private (Admin)
+exports.deleteBlog = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+
+        const blog = await Blog.findById(id);
+        if (!blog) {
+            return res.status(404).json({
+                success: false,
+                message: 'Blog not found'
+            });
+        }
+
+        blog.isStatus = false;
+        await blog.save();
+
+        logInfo('Blog deleted successfully', { blogId: id });
+
+        res.json({
+            success: true,
+            message: 'Blog deleted successfully'
+        });
+
+    } catch (error) {
+        logError('Error deleting blog', error, { blogId: req.params.id });
         res.status(500).json({ success: false, message: error.message });
     }
 };

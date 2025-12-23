@@ -46,6 +46,10 @@ const roleSchema = new mongoose.Schema({
         team: {
             type: permissionSchema,
             default: () => ({ add: false, edit: false, view: false, delete: false })
+        },
+        blog: {
+            type: permissionSchema,
+            default: () => ({ add: false, edit: false, view: false, delete: false })
         }
     }
 }, {

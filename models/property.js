@@ -7,28 +7,59 @@ const connectivitySchema = new mongoose.Schema({
     longitude: Number
 });
 
-const layoutSchema = new mongoose.Schema({
-    configurationUnitType: {
+// Helper function to parse price string to number (in rupees)
+const parsePriceToNumber = (priceStr) => {
+    if (!priceStr) return 0;
+    // If already a number, return it
+    if (typeof priceStr === 'number') return priceStr;
+    // Parse string price
+    let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+    const priceStrLower = priceStr.toString().toLowerCase();
+    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+        priceNum = priceNum * 100000;
+    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+        priceNum = priceNum * 10000000;
+    }
+    return priceNum;
+};
+
+// Sub-configuration schema - each unitType can have multiple carpetArea/price combinations
+const subConfigurationSchema = new mongoose.Schema({
+    carpetArea: {
         type: String,
         required: true
     },
-    image: {
-        type: String,
-        required: true
-    }
-});
-
-const configurationSchema = new mongoose.Schema({
-    unitType: { type: String, required: true },
-    carpetArea: String,
-    builtUpArea: String,
-    price: String,
+    price: {
+        type: Number,
+        required: true,
+        min: 0
+    },
     availabilityStatus: {
         type: String,
-        enum: ['Available', 'Sold', 'Reserved'],
+        enum: ['Available', 'Sold', 'Reserved', 'Ready'],
         default: 'Available'
+    },
+    layoutPlanImages: [{
+        type: String
+    }]
+}, { _id: true });
+
+// Pre-save hook to convert price string to number
+subConfigurationSchema.pre('save', function (next) {
+    if (this.price && typeof this.price === 'string') {
+        this.price = parsePriceToNumber(this.price);
     }
+    next();
 });
+
+// Configuration schema - each property can have multiple unitTypes
+const configurationSchema = new mongoose.Schema({
+    unitType: {
+        type: String,
+        required: true
+    },
+    subConfigurations: [subConfigurationSchema]
+}, { _id: true });
 
 const propertySchema = new mongoose.Schema(
     {
@@ -55,8 +86,14 @@ const propertySchema = new mongoose.Schema(
         projectSize: String,
         landParcel: String,
         possessionDate: Date,
-        developerPrice: String,
-        offerPrice: String,
+        developerPrice: {
+            type: Number,
+            min: 0
+        },
+        offerPrice: {
+            type: Number,
+            min: 0
+        },
         discountPercentage: { type: String, default: "00.00%" },
         minGroupMembers: Number,
 
@@ -82,8 +119,6 @@ const propertySchema = new mongoose.Schema(
 
         highlights: [String],
         amenities: [String],
-
-        layouts: [layoutSchema],
 
         connectivity: {
             type: Map,
@@ -112,11 +147,12 @@ const propertySchema = new mongoose.Schema(
     { timestamps: true }
 );
 
-// Helper function to parse price string to number
-const parsePriceToNumber = (priceStr) => {
+// Helper function to parse price string to number (for developerPrice/offerPrice)
+const parsePriceStringToNumber = (priceStr) => {
     if (!priceStr) return 0;
-    let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-    const priceStrLower = priceStr.toLowerCase();
+    if (typeof priceStr === 'number') return priceStr;
+    let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
+    const priceStrLower = priceStr.toString().toLowerCase();
     if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
         priceNum = priceNum * 100000;
     } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
@@ -135,8 +171,17 @@ propertySchema.pre('save', async function (next) {
 
     // Calculate discount percentage if developerPrice and offerPrice exist
     if (this.developerPrice && this.offerPrice) {
-        const devPrice = parsePriceToNumber(this.developerPrice);
-        const offerPrice = parsePriceToNumber(this.offerPrice);
+        // Convert string prices to numbers if needed
+        const devPrice = typeof this.developerPrice === 'number' ? this.developerPrice : parsePriceStringToNumber(this.developerPrice);
+        const offerPrice = typeof this.offerPrice === 'number' ? this.offerPrice : parsePriceStringToNumber(this.offerPrice);
+
+        // Update developerPrice and offerPrice to numbers if they were strings
+        if (typeof this.developerPrice === 'string') {
+            this.developerPrice = devPrice;
+        }
+        if (typeof this.offerPrice === 'string') {
+            this.offerPrice = offerPrice;
+        }
 
         if (devPrice > 0 && offerPrice > 0 && devPrice > offerPrice) {
             const discount = ((devPrice - offerPrice) / devPrice) * 100;

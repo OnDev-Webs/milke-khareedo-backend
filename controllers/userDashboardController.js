@@ -13,7 +13,22 @@ exports.getUserDashboard = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        // Optimize: Run all count queries in parallel
+        const user = await User.findById(userId).select('isPhoneVerified').lean();
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        if (!user.isPhoneVerified) {
+            return res.status(403).json({
+                success: false,
+                message: 'Please verify your phone number with OTP to access dashboard',
+                requiresOTPVerification: true
+            });
+        }
+
         const [totalViewed, totalFavorited, totalVisited] = await Promise.all([
             UserPropertyActivity.countDocuments({ userId, activityType: "viewed" }),
             UserPropertyActivity.countDocuments({ userId, activityType: "favorite" }),
@@ -116,19 +131,16 @@ exports.registerVisit = async (req, res) => {
         const userId = req.user.userId;
         const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
 
-        // Validate property
         const property = await Property.findById(propertyId).populate('relationshipManager');
         if (!property) {
             return res.status(404).json({ success: false, message: "Property not found" });
         }
 
-        // Parse visitDate
         let parsedVisitDate = visitDate ? new Date(visitDate) : null;
         if (visitDate && isNaN(parsedVisitDate.getTime())) {
             return res.status(400).json({ success: false, message: "Invalid visitDate format" });
         }
 
-        // Create or update visit activity - optimize with updateOne
         const existingActivity = await UserPropertyActivity.findOne({
             userId,
             propertyId,
@@ -142,7 +154,6 @@ exports.registerVisit = async (req, res) => {
                 source: source || "origin",
                 updatedBy: userId
             };
-            // Only update visitDate if provided to prevent overwriting existing values
             if (parsedVisitDate) {
                 updateData.visitDate = parsedVisitDate;
             }
@@ -164,7 +175,33 @@ exports.registerVisit = async (req, res) => {
             });
         }
 
-        // Create lead (minimal fields only)
+        const getClientIpAddress = (req) => {
+            const forwarded = req.headers['x-forwarded-for'];
+            if (forwarded) {
+                return forwarded.split(',')[0].trim();
+            }
+
+            if (req.headers['x-real-ip']) {
+                return req.headers['x-real-ip'];
+            }
+
+            if (req.ip) {
+                return req.ip;
+            }
+
+            if (req.connection && req.connection.remoteAddress) {
+                return req.connection.remoteAddress;
+            }
+
+            if (req.socket && req.socket.remoteAddress) {
+                return req.socket.remoteAddress;
+            }
+
+            return null;
+        };
+
+        const ipAddress = getClientIpAddress(req);
+
         await leadModal.create({
             userId,
             propertyId,
@@ -173,7 +210,8 @@ exports.registerVisit = async (req, res) => {
             rmPhone: property.relationshipManager?.phone || "",
             isStatus: true,
             source: source || "origin",
-            updatedBy: userId
+            updatedBy: userId,
+            ipAddress: ipAddress
         });
 
         res.json({
@@ -213,13 +251,11 @@ exports.getSearchHistory = async (req, res) => {
     try {
         const userId = req.user.userId;
 
-        // Get all search history for user, sorted by most recent
         const searches = await UserSearchHistory.find({ userId })
             .sort({ updatedAt: -1, createdAt: -1 })
             .lean()
-            .limit(100); // Limit to last 100 searches for performance
+            .limit(100); 
 
-        // Helper function to format date label (Today, Yesterday, or date)
         const getDateLabel = (date) => {
             const today = new Date();
             today.setHours(0, 0, 0, 0);
@@ -235,7 +271,6 @@ exports.getSearchHistory = async (req, res) => {
             } else if (searchDate.getTime() === yesterday.getTime()) {
                 return 'Yesterday';
             } else {
-                // Format as "DD MMM YYYY" (e.g., "15 Dec 2024")
                 return searchDate.toLocaleDateString('en-IN', {
                     day: 'numeric',
                     month: 'short',
@@ -244,11 +279,9 @@ exports.getSearchHistory = async (req, res) => {
             }
         };
 
-        // Group searches by date label
         const grouped = {};
 
         for (const search of searches) {
-            // Use updatedAt if available (for duplicate searches), otherwise use createdAt
             const searchDate = search.updatedAt || search.createdAt;
             const dateLabel = getDateLabel(searchDate);
 
@@ -256,7 +289,6 @@ exports.getSearchHistory = async (req, res) => {
                 grouped[dateLabel] = [];
             }
 
-            // Format search entry to match UI requirements
             grouped[dateLabel].push({
                 _id: search._id,
                 searchQuery: search.searchQuery || '',
@@ -266,14 +298,11 @@ exports.getSearchHistory = async (req, res) => {
             });
         }
 
-        // Convert grouped object to array format for easier frontend handling
-        // Sort by date (Today first, then Yesterday, then others by date)
         const sortedGroups = Object.keys(grouped).sort((a, b) => {
             if (a === 'Today') return -1;
             if (b === 'Today') return 1;
             if (a === 'Yesterday') return -1;
             if (b === 'Yesterday') return 1;
-            // For other dates, sort descending (newest first)
             return b.localeCompare(a);
         });
 
@@ -299,10 +328,13 @@ exports.saveContactPreferences = async (req, res) => {
     try {
         const userId = req.user.userId || req.user._id;
 
-        // Only allow these fields for preferences
         const { preferredLocations, budgetMin, budgetMax, floorMin, floorMax } = req.body;
 
-        // Validate preferredLocations (array of objects with name, latitude, longitude)
+        const budgetMinNum = budgetMin !== undefined ? Number(budgetMin) : undefined;
+        const budgetMaxNum = budgetMax !== undefined ? Number(budgetMax) : undefined;
+        const floorMinNum = floorMin !== undefined ? Number(floorMin) : undefined;
+        const floorMaxNum = floorMax !== undefined ? Number(floorMax) : undefined;
+
         if (preferredLocations !== undefined) {
             if (!Array.isArray(preferredLocations)) {
                 return res.status(400).json({
@@ -310,7 +342,6 @@ exports.saveContactPreferences = async (req, res) => {
                     message: "preferredLocations must be an array"
                 });
             }
-            // Validate each location object
             for (let i = 0; i < preferredLocations.length; i++) {
                 const loc = preferredLocations[i];
                 if (!loc || typeof loc !== 'object') {
@@ -340,72 +371,66 @@ exports.saveContactPreferences = async (req, res) => {
             }
         }
 
-        // Validate budget range
-        if (budgetMin !== undefined && (typeof budgetMin !== 'number' || budgetMin < 0)) {
+        if (budgetMinNum !== undefined && (isNaN(budgetMinNum) || budgetMinNum < 0)) {
             return res.status(400).json({
                 success: false,
                 message: "budgetMin must be a positive number"
             });
         }
 
-        if (budgetMax !== undefined && (typeof budgetMax !== 'number' || budgetMax < 0)) {
+        if (budgetMaxNum !== undefined && (isNaN(budgetMaxNum) || budgetMaxNum < 0)) {
             return res.status(400).json({
                 success: false,
                 message: "budgetMax must be a positive number"
             });
         }
 
-        if (budgetMin !== undefined && budgetMax !== undefined && budgetMin > budgetMax) {
+        if (budgetMinNum !== undefined && budgetMaxNum !== undefined && budgetMinNum > budgetMaxNum) {
             return res.status(400).json({
                 success: false,
                 message: "budgetMin cannot be greater than budgetMax"
             });
         }
 
-        // Validate floor range
-        if (floorMin !== undefined && (typeof floorMin !== 'number' || floorMin < 0)) {
+        if (floorMinNum !== undefined && (isNaN(floorMinNum) || floorMinNum < 0)) {
             return res.status(400).json({
                 success: false,
                 message: "floorMin must be a positive number"
             });
         }
 
-        if (floorMax !== undefined && (typeof floorMax !== 'number' || floorMax < 0)) {
+        if (floorMaxNum !== undefined && (isNaN(floorMaxNum) || floorMaxNum < 0)) {
             return res.status(400).json({
                 success: false,
                 message: "floorMax must be a positive number"
             });
         }
 
-        if (floorMin !== undefined && floorMax !== undefined && floorMin > floorMax) {
+        if (floorMinNum !== undefined && floorMaxNum !== undefined && floorMinNum > floorMaxNum) {
             return res.status(400).json({
                 success: false,
                 message: "floorMin cannot be greater than floorMax"
             });
         }
 
-        // Build update data object (only include provided fields)
         const updateData = {};
         if (preferredLocations !== undefined) updateData.preferredLocations = preferredLocations;
-        if (budgetMin !== undefined) updateData.budgetMin = budgetMin;
-        if (budgetMax !== undefined) updateData.budgetMax = budgetMax;
-        if (floorMin !== undefined) updateData.floorMin = floorMin;
-        if (floorMax !== undefined) updateData.floorMax = floorMax;
+        if (budgetMinNum !== undefined) updateData.budgetMin = budgetMinNum;
+        if (budgetMaxNum !== undefined) updateData.budgetMax = budgetMaxNum;
+        if (floorMinNum !== undefined) updateData.floorMin = floorMinNum;
+        if (floorMaxNum !== undefined) updateData.floorMax = floorMaxNum;
 
-        // Find or create preferences
         const existing = await ContactPreferences.findOne({ userId }).lean();
 
         let result;
 
         if (existing) {
-            // Update existing preferences
             result = await ContactPreferences.findOneAndUpdate(
                 { userId },
                 updateData,
                 { new: true, upsert: false }
             ).lean();
         } else {
-            // Create new preferences
             updateData.userId = userId;
             result = await ContactPreferences.create(updateData);
         }
@@ -517,7 +542,6 @@ exports.getFavoritedProperties = async (req, res) => {
             activityType: "favorite"
         });
 
-        // Optimize query with lean() and select only needed fields
         const data = await UserPropertyActivity.find({
             userId,
             activityType: "favorite"
@@ -565,18 +589,15 @@ exports.updateProfile = async (req, res) => {
         } = req.body;
         let profileImage = req.body.profileImage;
 
-        // Handle file upload if provided
         if (req.file) {
             profileImage = await uploadToS3(req.file, 'users/profile');
         }
 
         const updates = {};
 
-        // Update basic fields
         if (firstName !== undefined) updates.firstName = firstName;
         if (lastName !== undefined) updates.lastName = lastName;
         if (email !== undefined) {
-            // Check if email already exists for another user
             const existingUser = await User.findOne({ email, _id: { $ne: userId } }).lean();
             if (existingUser) {
                 return res.status(400).json({
@@ -587,7 +608,6 @@ exports.updateProfile = async (req, res) => {
             updates.email = email;
         }
         if (phoneNumber !== undefined) {
-            // Validate phone number format
             if (phoneNumber.length !== 10) {
                 return res.status(400).json({
                     success: false,
@@ -607,13 +627,11 @@ exports.updateProfile = async (req, res) => {
         }
         if (profileImage !== undefined) updates.profileImage = profileImage;
 
-        // Update profile fields (pincode, city, state, country)
         if (pincode !== undefined) updates.pincode = pincode;
         if (city !== undefined) updates.city = city;
         if (state !== undefined) updates.state = state;
         if (country !== undefined) updates.country = country;
 
-        // Check if any updates provided
         if (Object.keys(updates).length === 0) {
             return res.status(400).json({
                 success: false,
@@ -621,7 +639,6 @@ exports.updateProfile = async (req, res) => {
             });
         }
 
-        // Update user
         const updatedUser = await User.findByIdAndUpdate(userId, updates, {
             new: true,
             runValidators: true
@@ -680,10 +697,7 @@ exports.getVisitedProperties = async (req, res) => {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
-        // Get leads with visit activities using aggregation
-        // First, get all leads for this user that have visit activities
         const leadsWithVisits = await leadModal.aggregate([
-            // Match leads for this user
             {
                 $match: {
                     userId: new mongoose.Types.ObjectId(userId),
@@ -691,7 +705,6 @@ exports.getVisitedProperties = async (req, res) => {
                     propertyId: { $exists: true, $ne: null }
                 }
             },
-            // Lookup visit activities
             {
                 $lookup: {
                     from: 'leadactivities',
@@ -708,18 +721,16 @@ exports.getVisitedProperties = async (req, res) => {
                             }
                         },
                         { $sort: { visitDate: -1, activityDate: -1 } },
-                        { $limit: 1 } // Get the latest visit activity
+                        { $limit: 1 } 
                     ],
                     as: 'visitActivity'
                 }
             },
-            // Filter only leads that have visit activities
             {
                 $match: {
                     'visitActivity.0': { $exists: true }
                 }
             },
-            // Sort by latest visit date
             {
                 $sort: {
                     'visitActivity.visitDate': -1,
@@ -728,7 +739,6 @@ exports.getVisitedProperties = async (req, res) => {
             }
         ]);
 
-        // Separate upcoming and completed visits
         const upcomingLeads = [];
         const completedLeads = [];
 
@@ -744,7 +754,6 @@ exports.getVisitedProperties = async (req, res) => {
                     completedLeads.push(lead);
                 }
             } else {
-                // If no visitDate, use activityDate
                 const activityDate = new Date(visitActivity?.activityDate || lead.createdAt);
                 activityDate.setHours(0, 0, 0, 0);
 
@@ -756,28 +765,24 @@ exports.getVisitedProperties = async (req, res) => {
             }
         });
 
-        // Sort upcoming by visit date (ascending - earliest first)
         upcomingLeads.sort((a, b) => {
             const dateA = new Date(a.visitActivity[0]?.visitDate || a.visitActivity[0]?.activityDate || a.createdAt);
             const dateB = new Date(b.visitActivity[0]?.visitDate || b.visitActivity[0]?.activityDate || b.createdAt);
             return dateA - dateB;
         });
 
-        // Sort completed by visit date (descending - latest first)
         completedLeads.sort((a, b) => {
             const dateA = new Date(a.visitActivity[0]?.visitDate || a.visitActivity[0]?.activityDate || a.createdAt);
             const dateB = new Date(b.visitActivity[0]?.visitDate || b.visitActivity[0]?.activityDate || b.createdAt);
             return dateB - dateA;
         });
 
-        // Paginate
         const upcomingTotal = upcomingLeads.length;
         const completedTotal = completedLeads.length;
 
         const upcomingPaginated = upcomingLeads.slice(skip, skip + limit);
         const completedPaginated = completedLeads.slice(skip, skip + limit);
 
-        // Populate property data for upcoming visits
         const upcomingWithProperties = await Promise.all(
             upcomingPaginated.map(async (lead) => {
                 const property = await Property.findById(lead.propertyId)
@@ -823,7 +828,6 @@ exports.getVisitedProperties = async (req, res) => {
             })
         );
 
-        // Populate property data for completed visits
         const completedWithProperties = await Promise.all(
             completedPaginated.map(async (lead) => {
                 const property = await Property.findById(lead.propertyId)

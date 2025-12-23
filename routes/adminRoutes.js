@@ -3,7 +3,7 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const validate = require('../middleware/validator');
 const { body } = require('express-validator');
-const { authenticate, authorizeAdmin, authorizeSuperAdmin } = require('../middleware/auth');
+const { authenticate, authorizeAdmin, authorizeSuperAdmin, authorizeBlogAdd, authorizeBlogEdit, authorizeBlogView, authorizeBlogDelete } = require('../middleware/auth');
 const upload = require('../utils/multer');
 
 // AUTH ROUTES
@@ -48,7 +48,7 @@ router.get('/get_all_user_by_id/:id', authenticate, authorizeAdmin, adminControl
 // CREATE PROPERTY ROUTES
 router.post('/create_property', authenticate, upload.fields([
     { name: "images", maxCount: 10 },
-    { name: "layouts", maxCount: 10 },
+    { name: "layout_*", maxCount: 10 }, // Dynamic layout field names (e.g., layout_1BHK_3500)
     { name: "reraQrImage", maxCount: 1 }
 ]), authorizeAdmin, adminController.createProperty);
 
@@ -58,7 +58,7 @@ router.get('/get_all_property_by_id/:id', adminController.getPropertyById);
 
 router.put('/update_property/:id', authenticate, upload.fields([
     { name: "images", maxCount: 10 },
-    { name: "layouts", maxCount: 10 },
+    { name: "layout_*", maxCount: 10 }, // Dynamic layout field names (e.g., layout_1BHK_3500)
     { name: "reraQrImage", maxCount: 1 }
 ]), authorizeAdmin, adminController.updateProperty);
 
@@ -75,6 +75,8 @@ router.delete('/delete_developer/:id', authenticate, authorizeAdmin, adminContro
 router.get('/lead_list', authenticate, adminController.getLeadsList);
 router.get('/view_lead_list/:leadId', authenticate, adminController.viewLeadDetails);
 router.delete('/delete_lead_list/:leadId', authenticate, adminController.deleteLead);
+// EXPORT lEAD lIST AS CSV
+router.get('/leads/:leadId/export-csv', authenticate, adminController.exportLeadDetailsCSV);
 
 // Lead Timeline/Activity Routes
 router.post('/lead/:leadId/activity', authenticate, adminController.addLeadActivity);
@@ -99,9 +101,25 @@ router.delete('/delete_role/:id', authenticate, authorizeSuperAdmin, adminContro
 // ASSIGN NEW USER ROUTES
 router.post('/create_user', authenticate, authorizeSuperAdmin, adminController.createUser);
 router.get('/', authenticate, authorizeAdmin, adminController.getAllAssignUsers);
-router.get('/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
+router.get('/get_user/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
 router.put('/update_user/:id', authenticate, authorizeSuperAdmin, adminController.updateAssignUser);
 router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminController.deleteAssignUser);
+
+// BLOG MANAGEMENT ROUTES (with permission checks)
+router.post('/blog', authenticate, upload.fields([
+    { name: 'bannerImage', maxCount: 1 },
+    { name: 'galleryImages', maxCount: 10 }
+]), authorizeBlogAdd, adminController.createBlog);
+
+router.get('/blogs', authenticate, authorizeBlogView, adminController.getAllBlogs);
+
+router.get('/blog/:id', authenticate, authorizeBlogView, adminController.getBlogById);
+
+router.put('/blog/:id', authenticate, upload.fields([
+    { name: 'bannerImage', maxCount: 1 },
+    { name: 'galleryImages', maxCount: 10 }
+]), authorizeBlogEdit, adminController.updateBlog);
+router.delete('/blog/:id', authenticate, authorizeBlogDelete, adminController.deleteBlog);
 
 module.exports = router;
 

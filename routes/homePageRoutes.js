@@ -22,8 +22,6 @@ router.post('/property/visit', authenticate, homePageController.registerVisit);
 // Join Group Buy
 router.post('/join-group', authenticate, homePageController.joinGroup);
 
-// router.post('/search', optionalAuthenticate, homePageController.addSearchHistory);
-
 // Property Comparison
 router.post('/compare', homePageController.compareProperties);
 
@@ -32,5 +30,9 @@ router.post('/emi-calculator', homePageController.calculateEMI);
 
 // Contact Us
 router.post('/contact-us', optionalAuthenticate, homePageController.contactUs);
+
+// BLOG ROUTES
+router.get('/blogs', homePageController.getAllBlogs);
+router.get('/blog/:idOrSlug', homePageController.getBlogById);
 
 module.exports = router;
