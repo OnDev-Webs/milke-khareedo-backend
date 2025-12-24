@@ -226,36 +226,37 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             let discountPercentageValue = 0;
             let offerPriceNum = 0;
 
+            // Helper to parse price (handles both number and string for legacy support)
+            const parsePriceForDiscount = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+
+            // Get actual developerPrice and offerPrice from property
+            const devPriceNum = parsePriceForDiscount(property.developerPrice);
+            offerPriceNum = parsePriceForDiscount(property.offerPrice);
+
+            // Calculate discount
             if (property.discountPercentage) {
                 discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
-            }
-
-            if (property.developerPrice && property.offerPrice) {
-                // Helper to parse price (handles both number and string for legacy support)
-                const parsePriceForDiscount = (price) => {
-                    if (!price) return 0;
-                    if (typeof price === 'number') return price;
-                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-                    const priceStrLower = price.toString().toLowerCase();
-                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                        priceNum = priceNum * 100000;
-                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                        priceNum = priceNum * 10000000;
-                    }
-                    return priceNum;
-                };
-                const devPrice = parsePriceForDiscount(property.developerPrice);
-                offerPriceNum = parsePriceForDiscount(property.offerPrice);
-
-                if (devPrice > 0 && offerPriceNum > 0 && devPrice > offerPriceNum) {
-                    discountAmount = devPrice - offerPriceNum;
-                    if (!property.discountPercentage) {
-                        discountPercentageValue = parseFloat(((discountAmount / devPrice) * 100).toFixed(2));
-                    }
+                if (devPriceNum > 0 && discountPercentageValue > 0) {
+                    discountAmount = (devPriceNum * discountPercentageValue) / 100;
                 }
+            } else if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
+                discountAmount = devPriceNum - offerPriceNum;
+                discountPercentageValue = parseFloat(((discountAmount / devPriceNum) * 100).toFixed(2));
             }
 
             const formatPrice = (amount) => {
+                if (!amount || amount === 0) return '₹ 0';
                 if (amount >= 10000000) {
                     return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
                 } else if (amount >= 100000) {
@@ -307,27 +308,27 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                     formatted: formatPrice(minPrice)
                 },
                 developerPrice: {
-                    value: maxPrice,
-                    formatted: formatPrice(maxPrice)
+                    value: devPriceNum,
+                    formatted: formatPrice(devPriceNum)
                 },
-                discount: discountAmount > 0 ? {
+                discount: discountAmount > 0 && discountPercentageValue > 0 ? {
                     amount: discountAmount,
                     amountFormatted: formatPrice(discountAmount),
                     percentage: discountPercentageValue,
-                    percentageFormatted: property.discountPercentage || `${discountPercentageValue.toFixed(2)}%`,
-                    message: discountPercentageValue > 0 ? `Get upto ${discountPercentageValue}% discount on this property` : null,
+                    percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
+                    message: `Get upto ${discountPercentageValue.toFixed(2)}% discount on this property`,
                     displayText: `Up to ${formatPrice(discountAmount)}`
                 } : null,
-                offerPrice: property.offerPrice || null,
+                offerPrice: offerPriceNum > 0 ? formatPrice(offerPriceNum) : null,
                 discountPercentage: property.discountPercentage || "00.00%",
-                configurations: unitTypes,
-                configurationsFormatted: unitTypes.join(', '),
+                configurations: uniqueUnitTypes,
+                configurationsFormatted: uniqueUnitTypes.join(', '),
                 possessionStatus: property.possessionStatus || 'N/A',
                 developer: developerInfo?.developerName || 'N/A',
                 leadCount: leadCount,
                 reraId: property.reraId,
                 description: property.description,
-                relationshipManager: property.relationshipManager || null
+                relationshipManager: property.relationshipManager ? property.relationshipManager.toString() : null
             };
         });
 
