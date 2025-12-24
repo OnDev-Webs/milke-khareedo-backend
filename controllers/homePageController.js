@@ -88,7 +88,7 @@ const getClientIpAddress = (req) => {
 // @access  Public
 exports.getTopVisitedProperties = async (req, res, next) => {
     try {
-        let { page = 1, limit = 10, location, developer, projectName, possessionStatus, unitType } = req.query;
+        let { page = 1, limit = 6, location, developer, projectName, possessionStatus, unitType } = req.query;
         page = parseInt(page);
         limit = parseInt(limit);
         const skip = (page - 1) * limit;
