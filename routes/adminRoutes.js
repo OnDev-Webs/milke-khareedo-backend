@@ -46,11 +46,14 @@ router.get('/get_all_user_by_id/:id', authenticate, authorizeAdmin, adminControl
 
 
 // CREATE PROPERTY ROUTES
-router.post('/create_property', authenticate, upload.fields([
-    { name: "images", maxCount: 10 },
-    { name: "layout_*", maxCount: 10 }, // Dynamic layout field names (e.g., layout_1BHK_3500)
-    { name: "reraQrImage", maxCount: 1 }
-]), authorizeAdmin, adminController.createProperty);
+router.post(
+    "/create_property",
+    authenticate,
+    upload.any(),
+    authorizeAdmin,
+    adminController.createProperty
+);
+
 
 router.get('/get_all_property', adminController.getAllProperties);
 
