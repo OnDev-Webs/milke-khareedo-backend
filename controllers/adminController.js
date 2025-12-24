@@ -478,12 +478,10 @@ exports.createProperty = async (req, res, next) => {
             console.log('No images found to upload');
         }
 
-        // Handle layout images - check req.files array for layout_* fields
         if (req.files && Array.isArray(req.files)) {
 
             for (const file of req.files) {
                 if (file.fieldname && file.fieldname.startsWith('layout_')) {
-                    // Extract key from field name (e.g., "layout_1BHK_4100" -> "1BHK_4100")
                     const key = file.fieldname.replace('layout_', '');
 
                     const url = await uploadToS3(file, 'properties/layouts');
@@ -495,7 +493,6 @@ exports.createProperty = async (req, res, next) => {
                 }
             }
         } else if (req.files && typeof req.files === 'object') {
-            // Handle object format (if multer returns object instead of array)
             for (const [fieldName, files] of Object.entries(req.files)) {
                 if (fieldName.startsWith('layout_')) {
                     const key = fieldName.replace('layout_', '');
@@ -528,10 +525,7 @@ exports.createProperty = async (req, res, next) => {
                             subConfig.layoutPlanImages = [];
                         }
 
-                        // Extract unit type key (e.g., "1 BHK" -> "1BHK")
                         const unitTypeKey = (config.unitType || '').replace(/\s+/g, '');
-                        // Extract carpet area numbers only (e.g., "4100.00 ft²" -> "4100")
-                        // Match the file naming convention: layout_1BHK_4100 (numbers only, no decimals)
                         const carpetAreaKey = Math.floor(
                             parseFloat(
                                 (subConfig.carpetArea || '').toString().replace(/[^0-9.]/g, '')
@@ -623,14 +617,13 @@ exports.createProperty = async (req, res, next) => {
             isStatus: isStatus ?? true
         });
 
-        // Fetch the created property again to ensure all nested fields including layoutPlanImages are included
         const createdProperty = await Property.findById(property._id)
             .populate('developer', 'developerName')
             .populate('relationshipManager', 'name email')
             .populate('leadDistributionAgents', 'name email')
             .lean();
 
-        // Log for debugging
+        // Log for 
         logInfo('Fetched property after creation', {
             propertyId: property._id,
             dbImagesCount: createdProperty.images?.length || 0,
@@ -638,12 +631,9 @@ exports.createProperty = async (req, res, next) => {
             hasConfigurations: !!createdProperty.configurations
         });
 
-        // Ensure images array is properly included with full URLs
-        // Priority: Use DB images first (they're what was actually saved), then fallback to uploadedImages
+
         if (createdProperty.images && Array.isArray(createdProperty.images) && createdProperty.images.length > 0) {
-            // Use DB images - format them properly
             createdProperty.images = createdProperty.images.map((img, idx) => {
-                // Handle both object format and direct URL format
                 if (typeof img === 'string') {
                     return {
                         url: img,
@@ -657,21 +647,18 @@ exports.createProperty = async (req, res, next) => {
                     order: img.order || (idx + 1),
                     _id: img._id
                 };
-            }).filter(img => img.url && img.url.trim() !== ''); // Remove any images without URLs
+            }).filter(img => img.url && img.url.trim() !== '');
         } else if (uploadedImages && uploadedImages.length > 0) {
-            // Fallback: Use uploadedImages if DB doesn't have them yet
             createdProperty.images = uploadedImages.map((img, idx) => ({
                 url: img.url,
                 isCover: img.isCover !== undefined ? img.isCover : (idx === 0),
                 order: img.order || (idx + 1)
             }));
         } else {
-            // If no images at all, set empty array
             createdProperty.images = [];
         }
 
         if (configurations && Array.isArray(configurations) && configurations.length > 0) {
-            // Use the processed configurations that have layoutPlanImages mapped
             createdProperty.configurations = configurations.map((config, configIdx) => {
                 const dbConfig = createdProperty.configurations?.[configIdx];
                 const processedConfig = {
@@ -701,15 +688,12 @@ exports.createProperty = async (req, res, next) => {
                 return processedConfig;
             });
         } else if (createdProperty.configurations && Array.isArray(createdProperty.configurations)) {
-            // Fallback: ensure layoutPlanImages are properly formatted from DB
             createdProperty.configurations = createdProperty.configurations.map(config => {
                 if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
                     config.subConfigurations = config.subConfigurations.map(subConfig => {
-                        // Ensure layoutPlanImages array exists and has URLs
                         if (!subConfig.layoutPlanImages || !Array.isArray(subConfig.layoutPlanImages)) {
                             subConfig.layoutPlanImages = [];
                         }
-                        // Filter out any empty or invalid URLs
                         subConfig.layoutPlanImages = subConfig.layoutPlanImages.filter(url => url && typeof url === 'string' && url.trim() !== '');
                         return subConfig;
                     });
@@ -718,11 +702,9 @@ exports.createProperty = async (req, res, next) => {
             });
         }
 
-        // Convert connectivity Map to object for JSON response
         if (createdProperty.connectivity instanceof Map) {
             createdProperty.connectivity = Object.fromEntries(createdProperty.connectivity);
         } else if (createdProperty.connectivity && typeof createdProperty.connectivity === 'object') {
-            // Already an object, keep as is
         } else {
             createdProperty.connectivity = {};
         }
