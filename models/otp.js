@@ -53,3 +53,4 @@ otpSchema.index({ expiresAt: 1 });
 module.exports = mongoose.model('OTP', otpSchema);
 
 
+

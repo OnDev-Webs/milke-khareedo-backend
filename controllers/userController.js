@@ -10,35 +10,12 @@ const { logInfo, logError } = require('../utils/logger');
 const { generateOTP, sendOTP } = require('../utils/twilio');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// @desc    Register a new user
-// @route   POST /api/users/register
+// @desc    Login or Register user with phone number (unified endpoint)
+// @route   POST /api/users/login-or-register
 // @access  Public
-exports.register = async (req, res, next) => {
+exports.loginOrRegister = async (req, res, next) => {
     try {
-        const { firstName, lastName, email, password, phoneNumber, countryCode } = req.body;
-
-        if (!firstName || !lastName) {
-            return res.status(400).json({
-                success: false,
-                message: 'First name and last name are required'
-            });
-        }
-
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email is required'
-            });
-        }
-
-        const existingUser = await User.findOne({ email }).select('email').lean();
-        if (existingUser) {
-            logInfo('Registration attempt with existing email', { email });
-            return res.status(400).json({
-                success: false,
-                message: 'User already exists with this email'
-            });
-        }
+        const { phoneNumber, countryCode } = req.body;
 
         if (!phoneNumber || phoneNumber.length !== 10) {
             return res.status(400).json({
@@ -55,6 +32,9 @@ exports.register = async (req, res, next) => {
             });
         }
 
+        // Check if user exists by phone number
+        let user = await User.findOne({ phoneNumber });
+
         let defaultRole = await Role.findOne({ name: 'User' }).lean();
         if (!defaultRole) {
             defaultRole = await Role.create({
@@ -69,238 +49,103 @@ exports.register = async (req, res, next) => {
             logInfo('Default User role created');
         }
 
-        const user = await User.create({
-            firstName,
-            lastName,
-            email,
-            phoneNumber,
-            countryCode: finalCountryCode,
-            password,
-            role: defaultRole._id,
-            isPhoneVerified: false
+        let otpType = 'login';
+
+        // If user doesn't exist, create a new user with temporary values
+        if (!user) {
+            // Generate temporary email based on phone number
+            const tempEmail = `temp_${phoneNumber}@milke-khareedo.com`;
+
+            // Check if this temp email already exists (very unlikely but handle it)
+            let existingUserWithEmail = await User.findOne({ email: tempEmail });
+            if (existingUserWithEmail) {
+                // If somehow exists, use phone number with timestamp
+                const tempEmailWithTimestamp = `temp_${phoneNumber}_${Date.now()}@milke-khareedo.com`;
+
+                user = await User.create({
+                    firstName: 'User',
+                    lastName: phoneNumber.slice(-4), // Use last 4 digits as temporary lastName
+                    email: tempEmailWithTimestamp,
+                    phoneNumber,
+                    countryCode: finalCountryCode,
+                    password: `temp_${phoneNumber}_${Date.now()}`, // Temporary password
+                    role: defaultRole._id,
+                    isPhoneVerified: false
+                });
+            } else {
+                user = await User.create({
+                    firstName: 'User',
+                    lastName: phoneNumber.slice(-4), // Use last 4 digits as temporary lastName
+                    email: tempEmail,
+                    phoneNumber,
+                    countryCode: finalCountryCode,
+                    password: `temp_${phoneNumber}_${Date.now()}`, // Temporary password
+                    role: defaultRole._id,
+                    isPhoneVerified: false
+                });
+            }
+
+            otpType = 'registration';
+            logInfo('New user created for phone-based login/register', { userId: user._id, phoneNumber });
+        } else {
+            logInfo('Existing user found for phone-based login', { userId: user._id, phoneNumber });
+        }
+
+        // Delete any existing unverified OTPs for this user
+        await OTP.deleteMany({
+            userId: user._id,
+            type: otpType,
+            isVerified: false
         });
 
+        // Generate and save OTP
         const otp = generateOTP();
         const expiresAt = new Date();
-        expiresAt.setMinutes(expiresAt.getMinutes() + 10); 
+        expiresAt.setMinutes(expiresAt.getMinutes() + 10);
 
         await OTP.create({
             userId: user._id,
-            phoneNumber,
-            countryCode: finalCountryCode,
+            phoneNumber: user.phoneNumber,
+            countryCode: user.countryCode,
             otp,
-            type: 'registration',
+            type: otpType,
             expiresAt
         });
 
-        const smsResult = await sendOTP(phoneNumber, finalCountryCode, otp, 'registration');
+        // Send OTP
+        const smsResult = await sendOTP(user.phoneNumber, user.countryCode, otp, otpType);
 
         if (!smsResult.success) {
             logError('Failed to send OTP via Twilio', { userId: user._id, phoneNumber });
-            return res.status(201).json({
-                success: true,
-                message: 'User registered successfully, but OTP could not be sent. Please use resend OTP.',
-                data: {
-                    userId: user._id,
-                    email: user.email,
-                    phoneNumber: user.phoneNumber,
-                    requiresOTPVerification: true,
-                    otpSent: false
-                }
+            return res.status(500).json({
+                success: false,
+                message: 'Failed to send OTP. Please try again later.'
             });
         }
 
-        logInfo('User registered successfully, OTP sent', { userId: user._id, email: user.email });
-        res.status(201).json({
+        logInfo('OTP sent successfully for login/register', { userId: user._id, phoneNumber, type: otpType });
+
+        res.status(200).json({
             success: true,
-            message: 'User registered successfully. Please verify OTP sent to your phone number.',
+            message: `OTP sent successfully to ${user.countryCode}${user.phoneNumber}`,
             data: {
                 userId: user._id,
-                email: user.email,
                 phoneNumber: user.phoneNumber,
+                countryCode: user.countryCode,
+                type: otpType, // 'login' or 'registration'
                 requiresOTPVerification: true,
                 otpSent: true
             }
         });
+
     } catch (error) {
-        logError('Error during user registration', error);
+        logError('Error during login/register with phone', error);
         next(error);
     }
 };
 
-// @desc    Login user
-// @route   POST /api/users/login
-// @access  Public
-exports.login = async (req, res, next) => {
-    try {
-        const { email, password } = req.body;
 
-        const user = await User.findOne({ email }).select('+password').populate('role', 'name permissions');
-        if (!user) {
-            logInfo('Login attempt with invalid email', { email });
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid credentials'
-            });
-        }
 
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) {
-            logInfo('Login attempt with invalid password', { email });
-            return res.status(401).json({
-                success: false,
-                message: 'Invalid credentials'
-            });
-        }
-
-        if (!user.isPhoneVerified) {
-            const otp = generateOTP();
-            const expiresAt = new Date();
-            expiresAt.setMinutes(expiresAt.getMinutes() + 10);
-
-            await OTP.deleteMany({ userId: user._id, type: 'login', isVerified: false });
-
-            await OTP.create({
-                userId: user._id,
-                phoneNumber: user.phoneNumber,
-                countryCode: user.countryCode,
-                otp,
-                type: 'login',
-                expiresAt
-            });
-
-            const smsResult = await sendOTP(user.phoneNumber, user.countryCode, otp, 'login');
-
-            logInfo('Login OTP sent - phone not verified', { userId: user._id, email: user.email });
-            return res.status(200).json({
-                success: true,
-                message: 'Please verify your phone number with OTP sent to your phone',
-                data: {
-                    requiresOTPVerification: true,
-                    userId: user._id,
-                    phoneNumber: user.phoneNumber,
-                    otpSent: smsResult.success
-                }
-            });
-        }
-
-        const roleId = user.role?._id;  
-        const roleName = user.role?.name || 'user';
-
-        const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId, roleName },
-            jwtConfig.secret,
-            { expiresIn: jwtConfig.expiresIn }
-        );
-
-        logInfo('User logged in successfully', { userId: user._id, email: user.email });
-        res.json({
-            success: true,
-            message: 'Login successful',
-            data: {
-                user: {
-                    id: user._id,
-                    firstName: user.firstName,
-                    lastName: user.lastName,
-                    name: user.name,
-                    email: user.email,
-                    phoneNumber: user.phoneNumber,
-                    countryCode: user.countryCode,
-                    isPhoneVerified: user.isPhoneVerified,
-                    role: user.role ? {
-                        id: user.role._id,
-                        name: user.role.name,
-                        permissions: user.role.permissions
-                    } : { id: null, name: 'user', permissions: {} }
-                },
-                token
-            }
-        });
-
-    } catch (error) {
-        logError('Error during user login', error);
-        next(error);
-    }
-};
-
-// @desc    Login user
-// @route   POST /api/users/social-login/google
-// @access  Public
-exports.googleLogin = async (req, res, next) => {
-    try {
-        const { tokenId } = req.body;
-        const ticket = await client.verifyIdToken({
-            idToken: tokenId,
-            audience: process.env.GOOGLE_CLIENT_ID
-        });
-        const payload = ticket.getPayload();
-        const { email, given_name, family_name, name } = payload;
-
-        const firstName = given_name || (name ? name.split(' ')[0] : 'User');
-        const lastName = family_name || (name ? name.split(' ').slice(1).join(' ') || '' : '');
-
-        let user = await User.findOne({ email }).populate('role', 'name permissions');
-        if (!user) {
-            let defaultRole = await Role.findOne({ name: 'User' }).lean();
-            if (!defaultRole) {
-                defaultRole = await Role.create({
-                    name: 'User',
-                    permissions: {
-                        property: { add: false, edit: false, view: true, delete: false },
-                        developer: { add: false, edit: false, view: true, delete: false },
-                        crm: { add: false, edit: false, view: false, delete: false, export: false },
-                        team: { add: false, edit: false, view: false, delete: false }
-                    }
-                });
-                logInfo('Default User role created during Google login');
-            }
-
-            user = await User.create({
-                firstName,
-                lastName,
-                email,
-                phoneNumber: '0000000000', 
-                countryCode: '+91', 
-                password: '',
-                role: defaultRole._id
-            });
-            await user.populate('role', 'name permissions');
-            logInfo('New user created via Google login', { userId: user._id, email });
-        }
-
-        const token = jwt.sign(
-            { userId: user._id, email: user.email, roleId: user.role._id },
-            jwtConfig.secret,
-            { expiresIn: jwtConfig.expiresIn }
-        );
-
-        logInfo('User logged in via Google', { userId: user._id, email: user.email });
-        res.json({
-            success: true,
-            message: 'Login successful',
-            data: {
-                user: {
-                    id: user._id,
-                    firstName: user.firstName,
-                    lastName: user.lastName,
-                    name: user.name,
-                    email: user.email,
-                    phoneNumber: user.phoneNumber,
-                    countryCode: user.countryCode,
-                    role: {
-                        id: user.role._id,
-                        name: user.role.name,
-                        permissions: user.role.permissions
-                    }
-                },
-                token
-            }
-        });
-    } catch (error) {
-        logError('Error during Google login', error);
-        next(error);
-    }
-};
 // @desc    Get current user profile
 // @route   GET /api/users/profile
 // @access  Private
@@ -479,35 +324,49 @@ exports.deleteUser = async (req, res, next) => {
 // @access  Public
 exports.verifyOTP = async (req, res, next) => {
     try {
-        const { userId, otp, type = 'registration' } = req.body;
+        const { phoneNumber, countryCode, otp } = req.body;
 
-        if (!userId || !otp) {
+        if (!phoneNumber || !otp) {
             return res.status(400).json({
                 success: false,
-                message: 'User ID and OTP are required'
+                message: 'Phone number and OTP are required'
             });
         }
 
-        const user = await User.findById(userId);
+        if (phoneNumber.length !== 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'Phone number must be 10 digits'
+            });
+        }
+
+        const finalCountryCode = countryCode || '+91';
+
+        // Find user by phone number
+        const user = await User.findOne({ phoneNumber });
         if (!user) {
             return res.status(404).json({
                 success: false,
-                message: 'User not found'
+                message: 'User not found with this phone number'
             });
         }
 
+        const userId = user._id;
+
+        // Find OTP record by phoneNumber and otp (without type filter)
         const otpRecord = await OTP.findOne({
             userId,
+            phoneNumber,
             otp,
-            type,
             isVerified: false,
             expiresAt: { $gt: new Date() }
         });
 
         if (!otpRecord) {
+            // Check for existing unverified OTP to track attempts
             const existingOTP = await OTP.findOne({
                 userId,
-                type,
+                phoneNumber,
                 isVerified: false,
                 expiresAt: { $gt: new Date() }
             });
@@ -531,10 +390,14 @@ exports.verifyOTP = async (req, res, next) => {
             });
         }
 
+        // Get type from OTP record
+        const otpType = otpRecord.type;
+
         otpRecord.isVerified = true;
         await otpRecord.save();
 
-        if (type === 'registration' || type === 'login') {
+        // Verify phone if it's registration or login
+        if (otpType === 'registration' || otpType === 'login') {
             user.isPhoneVerified = true;
             user.phoneVerifiedAt = new Date();
             await user.save();
@@ -550,7 +413,7 @@ exports.verifyOTP = async (req, res, next) => {
             { expiresIn: jwtConfig.expiresIn }
         );
 
-        logInfo('OTP verified successfully', { userId, type });
+        logInfo('OTP verified successfully', { userId, phoneNumber, type: otpType });
 
         res.json({
             success: true,
@@ -586,25 +449,38 @@ exports.verifyOTP = async (req, res, next) => {
 // @access  Public
 exports.resendOTP = async (req, res, next) => {
     try {
-        const { userId, type = 'registration' } = req.body;
+        const { phoneNumber, countryCode, type = 'registration' } = req.body;
 
-        if (!userId) {
+        if (!phoneNumber) {
             return res.status(400).json({
                 success: false,
-                message: 'User ID is required'
+                message: 'Phone number is required'
             });
         }
 
-        const user = await User.findById(userId);
+        if (phoneNumber.length !== 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'Phone number must be 10 digits'
+            });
+        }
+
+        const finalCountryCode = countryCode || '+91';
+
+        // Find user by phone number
+        const user = await User.findOne({ phoneNumber });
         if (!user) {
             return res.status(404).json({
                 success: false,
-                message: 'User not found'
+                message: 'User not found with this phone number'
             });
         }
 
+        const userId = user._id;
+
         await OTP.deleteMany({
             userId,
+            phoneNumber,
             type,
             isVerified: false
         });
@@ -632,14 +508,15 @@ exports.resendOTP = async (req, res, next) => {
             });
         }
 
-        logInfo('OTP resent successfully', { userId, type });
+        logInfo('OTP resent successfully', { userId, phoneNumber, type });
 
         res.json({
             success: true,
-            message: 'OTP sent successfully to your phone number',
+            message: `OTP sent successfully to ${user.countryCode}${user.phoneNumber}`,
             data: {
                 userId: user._id,
                 phoneNumber: user.phoneNumber,
+                countryCode: user.countryCode,
                 type
             }
         });
@@ -650,132 +527,3 @@ exports.resendOTP = async (req, res, next) => {
     }
 };
 
-// @desc    Forgot Password - Send OTP
-// @route   POST /api/users/forgot-password
-// @access  Public
-exports.forgotPassword = async (req, res, next) => {
-    try {
-        const { email } = req.body;
-
-        if (!email) {
-            return res.status(400).json({
-                success: false,
-                message: 'Email is required'
-            });
-        }
-
-        const user = await User.findOne({ email });
-        if (!user) {
-            return res.json({
-                success: true,
-                message: 'If an account exists with this email, an OTP has been sent to your phone number.'
-            });
-        }
-
-        await OTP.deleteMany({
-            userId: user._id,
-            type: 'forgot_password',
-            isVerified: false
-        });
-
-        const otp = generateOTP();
-        const expiresAt = new Date();
-        expiresAt.setMinutes(expiresAt.getMinutes() + 10);
-
-        await OTP.create({
-            userId: user._id,
-            phoneNumber: user.phoneNumber,
-            countryCode: user.countryCode,
-            otp,
-            type: 'forgot_password',
-            expiresAt
-        });
-
-        const smsResult = await sendOTP(user.phoneNumber, user.countryCode, otp, 'forgot_password');
-
-        if (!smsResult.success) {
-            logError('Failed to send forgot password OTP', { userId: user._id });
-            return res.status(500).json({
-                success: false,
-                message: 'Failed to send OTP. Please try again later.'
-            });
-        }
-
-        logInfo('Forgot password OTP sent', { userId: user._id, email });
-
-        res.json({
-            success: true,
-            message: 'OTP sent successfully to your phone number',
-            data: {
-                userId: user._id
-            }
-        });
-
-    } catch (error) {
-        logError('Error in forgot password', error);
-        next(error);
-    }
-};
-
-// @desc    Reset Password after OTP verification
-// @route   POST /api/users/reset-password
-// @access  Public
-exports.resetPassword = async (req, res, next) => {
-    try {
-        const { userId, otp, newPassword } = req.body;
-
-        if (!userId || !otp || !newPassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'User ID, OTP, and new password are required'
-            });
-        }
-
-        if (newPassword.length < 6) {
-            return res.status(400).json({
-                success: false,
-                message: 'Password must be at least 6 characters'
-            });
-        }
-
-        const user = await User.findById(userId).select('+password');
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        const otpRecord = await OTP.findOne({
-            userId,
-            otp,
-            type: 'forgot_password',
-            isVerified: false,
-            expiresAt: { $gt: new Date() }
-        });
-
-        if (!otpRecord) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid or expired OTP'
-            });
-        }
-
-        otpRecord.isVerified = true;
-        await otpRecord.save();
-
-        user.password = newPassword; 
-        await user.save();
-
-        logInfo('Password reset successfully', { userId: user._id });
-
-        res.json({
-            success: true,
-            message: 'Password reset successfully. Please login with your new password.'
-        });
-
-    } catch (error) {
-        logError('Error resetting password', error);
-        next(error);
-    }
-};

@@ -8,22 +8,65 @@ const upload = require('../utils/multer');
 
 // Validation rules
 
-const loginValidation = [
-    body('email').isEmail().withMessage('Please provide a valid email'),
-    body('password').notEmpty().withMessage('Password is required')
+
+const phoneLoginValidation = [
+    body('phoneNumber')
+        .isLength({ min: 10, max: 10 })
+        .withMessage('Phone number must be exactly 10 digits')
+        .matches(/^[0-9]{10}$/)
+        .withMessage('Phone number must contain only digits'),
+    body('countryCode')
+        .optional()
+        .matches(/^\+[0-9]{1,4}$/)
+        .withMessage('Country code must start with + and be 1-4 digits (e.g., +91)')
+];
+
+const verifyOTPValidation = [
+    body('phoneNumber')
+        .notEmpty()
+        .withMessage('Phone number is required')
+        .isLength({ min: 10, max: 10 })
+        .withMessage('Phone number must be exactly 10 digits')
+        .matches(/^[0-9]{10}$/)
+        .withMessage('Phone number must contain only digits'),
+    body('countryCode')
+        .optional()
+        .matches(/^\+[0-9]{1,4}$/)
+        .withMessage('Country code must start with + and be 1-4 digits (e.g., +91)'),
+    body('otp')
+        .notEmpty()
+        .withMessage('OTP is required')
+        .matches(/^[0-9]{6}$/)
+        .withMessage('OTP must be 6 digits')
+];
+
+const resendOTPValidation = [
+    body('phoneNumber')
+        .notEmpty()
+        .withMessage('Phone number is required')
+        .isLength({ min: 10, max: 10 })
+        .withMessage('Phone number must be exactly 10 digits')
+        .matches(/^[0-9]{10}$/)
+        .withMessage('Phone number must contain only digits'),
+    body('countryCode')
+        .optional()
+        .matches(/^\+[0-9]{1,4}$/)
+        .withMessage('Country code must start with + and be 1-4 digits (e.g., +91)'),
+    body('type')
+        .optional()
+        .isIn(['registration', 'login', 'forgot_password'])
+        .withMessage('Invalid OTP type')
 ];
 
 // Routes
-router.post('/register', validate, userController.register);
-router.post('/login', loginValidation, validate, userController.login);
-router.post('/social-login/google', userController.googleLogin);
+// Unified login/register with phone number
+router.post('/login-or-register', phoneLoginValidation, validate, userController.loginOrRegister);
 router.get('/profile', authenticate, userController.getProfile);
 
 // OTP Routes
-router.post('/verify-otp', userController.verifyOTP);
-router.post('/resend-otp', userController.resendOTP);
-router.post('/forgot-password', userController.forgotPassword);
-router.post('/reset-password', userController.resetPassword);
+router.post('/verify-otp', verifyOTPValidation, validate, userController.verifyOTP);
+router.post('/resend-otp', resendOTPValidation, validate, userController.resendOTP);
+
 
 router.put('/:id', authenticate, upload.single('profileImage'), userController.updateUser);
 router.delete('/:id', authenticate, userController.deleteUser);
