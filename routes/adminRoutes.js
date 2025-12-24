@@ -59,11 +59,7 @@ router.get('/get_all_property', adminController.getAllProperties);
 
 router.get('/get_all_property_by_id/:id', adminController.getPropertyById);
 
-router.put('/update_property/:id', authenticate, upload.fields([
-    { name: "images", maxCount: 10 },
-    { name: "layout_*", maxCount: 10 }, // Dynamic layout field names (e.g., layout_1BHK_3500)
-    { name: "reraQrImage", maxCount: 1 }
-]), authorizeAdmin, adminController.updateProperty);
+router.put('/update_property/:id', authenticate, upload.any(), authorizeAdmin, adminController.updateProperty);
 
 router.delete('/delete_property/:id', authenticate, authorizeAdmin, adminController.deleteProperty);
 
