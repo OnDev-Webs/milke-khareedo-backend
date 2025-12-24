@@ -385,6 +385,13 @@ exports.createProperty = async (req, res, next) => {
 
         const layoutImagesMap = new Map();
 
+
+        if (req.files) {
+            Object.keys(req.files).forEach(key => {
+                console.log(`req.files[${key}]:`, Array.isArray(req.files[key]) ? req.files[key].length : 'single file');
+            });
+        }
+
         const dev = await Developer.findById(developer).lean();
         if (!dev) {
             logInfo('Property creation failed - invalid developer', { developer });
@@ -445,19 +452,47 @@ exports.createProperty = async (req, res, next) => {
             leadDistributionAgents = [];
         }
 
-        if (req.files?.images && req.files.images.length > 0) {
-            for (let i = 0; i < req.files.images.length; i++) {
-                const file = req.files.images[i];
-                const url = await uploadToS3(file, 'properties/images');
-                uploadedImages.push({
-                    url,
-                    isCover: i === 0, 
-                    order: i + 1
-                });
+        // Handle images upload - upload.any() returns array, so filter by fieldname
+        const imageFiles = Array.isArray(req.files)
+            ? req.files.filter(f => f.fieldname === 'images')
+            : (req.files?.images ? (Array.isArray(req.files.images) ? req.files.images : [req.files.images]) : []);
+
+
+
+        if (imageFiles && imageFiles.length > 0) {
+            for (let i = 0; i < imageFiles.length; i++) {
+                const file = imageFiles[i];
+                try {
+                    const url = await uploadToS3(file, 'properties/images');
+                    uploadedImages.push({
+                        url,
+                        isCover: i === 0,
+                        order: i + 1
+                    });
+                } catch (error) {
+                    console.error(`Error uploading image ${i + 1}:`, error);
+                    logError('Error uploading image to S3', error, { fileName: file.originalname });
+                }
             }
+        } else {
+            console.log('No images found to upload');
         }
 
-        if (req.files) {
+        if (req.files && Array.isArray(req.files)) {
+
+            for (const file of req.files) {
+                if (file.fieldname && file.fieldname.startsWith('layout_')) {
+                    const key = file.fieldname.replace('layout_', '');
+
+                    const url = await uploadToS3(file, 'properties/layouts');
+
+                    if (!layoutImagesMap.has(key)) {
+                        layoutImagesMap.set(key, []);
+                    }
+                    layoutImagesMap.get(key).push(url);
+                }
+            }
+        } else if (req.files && typeof req.files === 'object') {
             for (const [fieldName, files] of Object.entries(req.files)) {
                 if (fieldName.startsWith('layout_')) {
                     const key = fieldName.replace('layout_', '');
@@ -478,7 +513,7 @@ exports.createProperty = async (req, res, next) => {
             for (let configIndex = 0; configIndex < configurations.length; configIndex++) {
                 const config = configurations[configIndex];
 
-                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                if (config.subConfigurations) {
                     for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
                         const subConfig = config.subConfigurations[subIndex];
 
@@ -491,11 +526,18 @@ exports.createProperty = async (req, res, next) => {
                         }
 
                         const unitTypeKey = (config.unitType || '').replace(/\s+/g, '');
-                        const carpetAreaKey = (subConfig.carpetArea || '').replace(/\s+/g, '').replace(/[^0-9.]/g, '');
+                        const carpetAreaKey = Math.floor(
+                            parseFloat(
+                                (subConfig.carpetArea || '').toString().replace(/[^0-9.]/g, '')
+                            ) || 0
+                        ).toString();
+
                         const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
 
+
                         if (layoutImagesMap.has(lookupKey)) {
-                            subConfig.layoutPlanImages = layoutImagesMap.get(lookupKey);
+                            const images = layoutImagesMap.get(lookupKey);
+                            subConfig.layoutPlanImages = images;
                         } else {
                             const altKey1 = `${configIndex}_${subIndex}`;
                             const altKey2 = `layout_${configIndex}_${subIndex}`;
@@ -504,8 +546,11 @@ exports.createProperty = async (req, res, next) => {
                                 subConfig.layoutPlanImages = layoutImagesMap.get(altKey1);
                             } else if (layoutImagesMap.has(altKey2)) {
                                 subConfig.layoutPlanImages = layoutImagesMap.get(altKey2);
+                            } else {
+                                console.log(`No layout images found for any key`);
                             }
                         }
+
 
                         if (layoutImagesMapping && layoutImagesMapping[config.unitType]) {
                             const unitTypeMapping = layoutImagesMapping[config.unitType];
@@ -539,6 +584,12 @@ exports.createProperty = async (req, res, next) => {
 
         const discountPercentage = calculateDiscountPercentage(developerPrice, offerPrice);
 
+        // Log for debugging
+        logInfo('Creating property with images', {
+            uploadedImagesCount: uploadedImages.length,
+            configurationsCount: configurations.length
+        });
+
         const property = await Property.create({
             projectName,
             developer,
@@ -566,6 +617,98 @@ exports.createProperty = async (req, res, next) => {
             isStatus: isStatus ?? true
         });
 
+        const createdProperty = await Property.findById(property._id)
+            .populate('developer', 'developerName')
+            .populate('relationshipManager', 'name email')
+            .populate('leadDistributionAgents', 'name email')
+            .lean();
+
+        // Log for 
+        logInfo('Fetched property after creation', {
+            propertyId: property._id,
+            dbImagesCount: createdProperty.images?.length || 0,
+            uploadedImagesCount: uploadedImages.length,
+            hasConfigurations: !!createdProperty.configurations
+        });
+
+
+        if (createdProperty.images && Array.isArray(createdProperty.images) && createdProperty.images.length > 0) {
+            createdProperty.images = createdProperty.images.map((img, idx) => {
+                if (typeof img === 'string') {
+                    return {
+                        url: img,
+                        isCover: idx === 0,
+                        order: idx + 1
+                    };
+                }
+                return {
+                    url: img.url || '',
+                    isCover: img.isCover !== undefined ? img.isCover : (idx === 0),
+                    order: img.order || (idx + 1),
+                    _id: img._id
+                };
+            }).filter(img => img.url && img.url.trim() !== '');
+        } else if (uploadedImages && uploadedImages.length > 0) {
+            createdProperty.images = uploadedImages.map((img, idx) => ({
+                url: img.url,
+                isCover: img.isCover !== undefined ? img.isCover : (idx === 0),
+                order: img.order || (idx + 1)
+            }));
+        } else {
+            createdProperty.images = [];
+        }
+
+        if (configurations && Array.isArray(configurations) && configurations.length > 0) {
+            createdProperty.configurations = configurations.map((config, configIdx) => {
+                const dbConfig = createdProperty.configurations?.[configIdx];
+                const processedConfig = {
+                    unitType: config.unitType,
+                    _id: config._id || dbConfig?._id,
+                    subConfigurations: []
+                };
+
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    processedConfig.subConfigurations = config.subConfigurations.map((subConfig, subIdx) => {
+                        const dbSubConfig = dbConfig?.subConfigurations?.[subIdx];
+                        const layoutImages = Array.isArray(subConfig.layoutPlanImages)
+                            ? subConfig.layoutPlanImages.filter(url => url && typeof url === 'string' && url.trim() !== '')
+                            : [];
+
+
+                        return {
+                            carpetArea: subConfig.carpetArea,
+                            price: subConfig.price, // Already converted to number
+                            availabilityStatus: subConfig.availabilityStatus || 'Available',
+                            layoutPlanImages: layoutImages.length > 0 ? layoutImages : (dbSubConfig?.layoutPlanImages || []),
+                            _id: subConfig._id || dbSubConfig?._id
+                        };
+                    });
+                }
+
+                return processedConfig;
+            });
+        } else if (createdProperty.configurations && Array.isArray(createdProperty.configurations)) {
+            createdProperty.configurations = createdProperty.configurations.map(config => {
+                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                    config.subConfigurations = config.subConfigurations.map(subConfig => {
+                        if (!subConfig.layoutPlanImages || !Array.isArray(subConfig.layoutPlanImages)) {
+                            subConfig.layoutPlanImages = [];
+                        }
+                        subConfig.layoutPlanImages = subConfig.layoutPlanImages.filter(url => url && typeof url === 'string' && url.trim() !== '');
+                        return subConfig;
+                    });
+                }
+                return config;
+            });
+        }
+
+        if (createdProperty.connectivity instanceof Map) {
+            createdProperty.connectivity = Object.fromEntries(createdProperty.connectivity);
+        } else if (createdProperty.connectivity && typeof createdProperty.connectivity === 'object') {
+        } else {
+            createdProperty.connectivity = {};
+        }
+
         const [developers, relationshipManagers, agents] = await Promise.all([
             Developer.findOne({ _id: developer }).select("_id name").lean(),
             User.find({ role: projectManagerRole._id }).select("_id name email").lean(),
@@ -581,7 +724,7 @@ exports.createProperty = async (req, res, next) => {
             success: true,
             message: "Property created successfully",
             data: {
-                property,
+                property: createdProperty,
                 dropdownData: {
                     developers,
                     relationshipManagers,
@@ -2788,7 +2931,7 @@ exports.getFilteredLeads = async (req, res) => {
                 populate: { path: "relationshipManager", select: "name" }
             })
             .populate("userId", "name email phone")
-            .sort({ createdAt: -1 }) 
+            .sort({ createdAt: -1 })
             .skip(skip)
             .limit(parseInt(limit));
 
@@ -3097,7 +3240,7 @@ exports.getCRMDashboard = async (req, res, next) => {
             } else if (sortBy === 'oldest_first') {
                 sortCriteria = { createdAt: 1 };
             } else {
-                sortCriteria = { createdAt: -1 }; 
+                sortCriteria = { createdAt: -1 };
             }
 
             leads = await leadModal.find({
@@ -3340,7 +3483,7 @@ exports.getNotifications = async (req, res, next) => {
             if (b === 'Today') return 1;
             if (a === 'Yesterday') return -1;
             if (b === 'Yesterday') return 1;
-            return b.localeCompare(a); 
+            return b.localeCompare(a);
         });
 
         const formattedData = sortedLabels.map(label => ({
