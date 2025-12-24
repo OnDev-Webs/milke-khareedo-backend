@@ -452,44 +452,19 @@ exports.createProperty = async (req, res, next) => {
             leadDistributionAgents = [];
         }
 
-        // Handle images upload - upload.any() returns array, so filter by fieldname
+        // Store files for background processing (don't await uploads - they'll run in background)
         const imageFiles = Array.isArray(req.files)
             ? req.files.filter(f => f.fieldname === 'images')
             : (req.files?.images ? (Array.isArray(req.files.images) ? req.files.images : [req.files.images]) : []);
 
-
-
-        if (imageFiles && imageFiles.length > 0) {
-            for (let i = 0; i < imageFiles.length; i++) {
-                const file = imageFiles[i];
-                try {
-                    const url = await uploadToS3(file, 'properties/images');
-                    uploadedImages.push({
-                        url,
-                        isCover: i === 0,
-                        order: i + 1
-                    });
-                } catch (error) {
-                    console.error(`Error uploading image ${i + 1}:`, error);
-                    logError('Error uploading image to S3', error, { fileName: file.originalname });
-                }
-            }
-        } else {
-            console.log('No images found to upload');
-        }
-
+        const layoutFiles = [];
         if (req.files && Array.isArray(req.files)) {
-
             for (const file of req.files) {
                 if (file.fieldname && file.fieldname.startsWith('layout_')) {
-                    const key = file.fieldname.replace('layout_', '');
-
-                    const url = await uploadToS3(file, 'properties/layouts');
-
-                    if (!layoutImagesMap.has(key)) {
-                        layoutImagesMap.set(key, []);
-                    }
-                    layoutImagesMap.get(key).push(url);
+                    layoutFiles.push({
+                        file,
+                        key: file.fieldname.replace('layout_', '')
+                    });
                 }
             }
         } else if (req.files && typeof req.files === 'object') {
@@ -497,14 +472,24 @@ exports.createProperty = async (req, res, next) => {
                 if (fieldName.startsWith('layout_')) {
                     const key = fieldName.replace('layout_', '');
                     const fileArray = Array.isArray(files) ? files : [files];
-
                     for (const file of fileArray) {
-                        const url = await uploadToS3(file, 'properties/layouts');
-                        if (!layoutImagesMap.has(key)) {
-                            layoutImagesMap.set(key, []);
-                        }
-                        layoutImagesMap.get(key).push(url);
+                        layoutFiles.push({ file, key });
                     }
+                }
+            }
+        }
+
+        // Handle RERA QR image upload (quick, single file - do it synchronously)
+        if (req.files) {
+            const reraFile = Array.isArray(req.files)
+                ? req.files.find(f => f.fieldname === 'reraQrImage')
+                : req.files.reraQrImage;
+
+            if (reraFile) {
+                try {
+                    uploadedQrImage = await uploadToS3(reraFile, 'properties/rera');
+                } catch (error) {
+                    logError('Error uploading RERA QR image', error);
                 }
             }
         }
@@ -566,10 +551,7 @@ exports.createProperty = async (req, res, next) => {
             }
         }
 
-        if (req.files?.reraQrImage && req.files.reraQrImage.length > 0) {
-            const qrFile = req.files.reraQrImage[0];
-            uploadedQrImage = await uploadToS3(qrFile, 'properties/rera');
-        }
+        // RERA QR image already handled above
 
         const calculateDiscountPercentage = (devPrice, offerPrice) => {
             if (!devPrice || !offerPrice) return "00.00%";
@@ -607,8 +589,8 @@ exports.createProperty = async (req, res, next) => {
             reraQrImage: uploadedQrImage || req.body.reraQrImage,
             possessionStatus,
             description,
-            configurations,
-            images: uploadedImages,
+            configurations, // Will be updated with layout images in background
+            images: [], // Will be updated in background
             highlights,
             amenities,
             connectivity: connectivityMap.size > 0 ? connectivityMap : new Map(),
@@ -616,6 +598,96 @@ exports.createProperty = async (req, res, next) => {
             leadDistributionAgents,
             isStatus: isStatus ?? true
         });
+
+        // Process image uploads in background (non-blocking)
+        (async () => {
+            try {
+                const backgroundUploadedImages = [];
+                const backgroundLayoutImagesMap = new Map();
+
+                // Upload property images in background
+                if (imageFiles && imageFiles.length > 0) {
+                    for (let i = 0; i < imageFiles.length; i++) {
+                        const file = imageFiles[i];
+                        try {
+                            const url = await uploadToS3(file, 'properties/images');
+                            backgroundUploadedImages.push({
+                                url,
+                                isCover: i === 0,
+                                order: i + 1
+                            });
+                        } catch (error) {
+                            logError('Error uploading image to S3 (background)', error, {
+                                fileName: file.originalname,
+                                propertyId: property._id
+                            });
+                        }
+                    }
+                }
+
+                // Upload layout images in background
+                for (const { file, key } of layoutFiles) {
+                    try {
+                        const url = await uploadToS3(file, 'properties/layouts');
+                        if (!backgroundLayoutImagesMap.has(key)) {
+                            backgroundLayoutImagesMap.set(key, []);
+                        }
+                        backgroundLayoutImagesMap.get(key).push(url);
+                    } catch (error) {
+                        logError('Error uploading layout image to S3 (background)', error, {
+                            fileName: file.originalname,
+                            propertyId: property._id,
+                            key
+                        });
+                    }
+                }
+
+                // Update configurations with layout images
+                if (backgroundLayoutImagesMap.size > 0 && configurations && Array.isArray(configurations)) {
+                    for (let configIndex = 0; configIndex < configurations.length; configIndex++) {
+                        const config = configurations[configIndex];
+                        if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                            for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
+                                const subConfig = config.subConfigurations[subIndex];
+                                const unitTypeKey = (config.unitType || '').replace(/\s+/g, '');
+                                const carpetAreaKey = Math.floor(
+                                    parseFloat(
+                                        (subConfig.carpetArea || '').toString().replace(/[^0-9.]/g, '')
+                                    ) || 0
+                                ).toString();
+                                const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
+
+                                if (backgroundLayoutImagesMap.has(lookupKey)) {
+                                    subConfig.layoutPlanImages = backgroundLayoutImagesMap.get(lookupKey);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Update property with uploaded images and configurations
+                const updateData = {};
+                if (backgroundUploadedImages.length > 0) {
+                    updateData.images = backgroundUploadedImages;
+                }
+                if (backgroundLayoutImagesMap.size > 0) {
+                    updateData.configurations = configurations;
+                }
+
+                if (Object.keys(updateData).length > 0) {
+                    await Property.findByIdAndUpdate(property._id, updateData, { new: true });
+                    logInfo('Property images updated in background', {
+                        propertyId: property._id,
+                        imagesCount: backgroundUploadedImages.length,
+                        layoutImagesCount: backgroundLayoutImagesMap.size
+                    });
+                }
+            } catch (error) {
+                logError('Error in background image upload process', error, {
+                    propertyId: property._id
+                });
+            }
+        })();
 
         const createdProperty = await Property.findById(property._id)
             .populate('developer', 'developerName')
@@ -632,6 +704,7 @@ exports.createProperty = async (req, res, next) => {
         });
 
 
+        // Format images for response (may be empty initially, will be updated in background)
         if (createdProperty.images && Array.isArray(createdProperty.images) && createdProperty.images.length > 0) {
             createdProperty.images = createdProperty.images.map((img, idx) => {
                 if (typeof img === 'string') {
@@ -648,12 +721,6 @@ exports.createProperty = async (req, res, next) => {
                     _id: img._id
                 };
             }).filter(img => img.url && img.url.trim() !== '');
-        } else if (uploadedImages && uploadedImages.length > 0) {
-            createdProperty.images = uploadedImages.map((img, idx) => ({
-                url: img.url,
-                isCover: img.isCover !== undefined ? img.isCover : (idx === 0),
-                order: img.order || (idx + 1)
-            }));
         } else {
             createdProperty.images = [];
         }

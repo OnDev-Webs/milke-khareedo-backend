@@ -173,7 +173,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         const developerMap = new Map(developers.map(dev => [dev._id.toString(), dev]));
 
         const formattedProperties = rawData.map((item) => {
-            const property = item; 
+            const property = item;
             const leadCount = property.leadCount || 0;
 
             const developerId = property.developer?._id
@@ -181,7 +181,21 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 : (property.developer?.toString() || property.developer);
             const developerInfo = developerMap.get(developerId);
 
-            const prices = extractPricesFromConfigurations(property.configurations, property.developerPrice || '0');
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
             const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
@@ -217,22 +231,21 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             }
 
             if (property.developerPrice && property.offerPrice) {
-                let devPrice = parseFloat(property.developerPrice.replace(/[₹,\s]/g, '')) || 0;
-                offerPriceNum = parseFloat(property.offerPrice.replace(/[₹,\s]/g, '')) || 0;
-
-                const devPriceStr = property.developerPrice.toLowerCase();
-                if (devPriceStr.includes('lakh') || devPriceStr.includes('l')) {
-                    devPrice = devPrice * 100000;
-                } else if (devPriceStr.includes('cr') || devPriceStr.includes('crore')) {
-                    devPrice = devPrice * 10000000;
-                }
-
-                const offerPriceStr = property.offerPrice.toLowerCase();
-                if (offerPriceStr.includes('lakh') || offerPriceStr.includes('l')) {
-                    offerPriceNum = offerPriceNum * 100000;
-                } else if (offerPriceStr.includes('cr') || offerPriceStr.includes('crore')) {
-                    offerPriceNum = offerPriceNum * 10000000;
-                }
+                // Helper to parse price (handles both number and string for legacy support)
+                const parsePriceForDiscount = (price) => {
+                    if (!price) return 0;
+                    if (typeof price === 'number') return price;
+                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                    const priceStrLower = price.toString().toLowerCase();
+                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                        priceNum = priceNum * 100000;
+                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                        priceNum = priceNum * 10000000;
+                    }
+                    return priceNum;
+                };
+                const devPrice = parsePriceForDiscount(property.developerPrice);
+                offerPriceNum = parsePriceForDiscount(property.offerPrice);
 
                 if (devPrice > 0 && offerPriceNum > 0 && devPrice > offerPriceNum) {
                     discountAmount = devPrice - offerPriceNum;
@@ -631,22 +644,21 @@ exports.searchProperties = async (req, res, next) => {
             }
 
             if (property.developerPrice && property.offerPrice) {
-                let devPrice = parseFloat(property.developerPrice.replace(/[₹,\s]/g, '')) || 0;
-                offerPriceNum = parseFloat(property.offerPrice.replace(/[₹,\s]/g, '')) || 0;
-
-                const devPriceStr = property.developerPrice.toLowerCase();
-                if (devPriceStr.includes('lakh') || devPriceStr.includes('l')) {
-                    devPrice = devPrice * 100000;
-                } else if (devPriceStr.includes('cr') || devPriceStr.includes('crore')) {
-                    devPrice = devPrice * 10000000;
-                }
-
-                const offerPriceStr = property.offerPrice.toLowerCase();
-                if (offerPriceStr.includes('lakh') || offerPriceStr.includes('l')) {
-                    offerPriceNum = offerPriceNum * 100000;
-                } else if (offerPriceStr.includes('cr') || offerPriceStr.includes('crore')) {
-                    offerPriceNum = offerPriceNum * 10000000;
-                }
+                // Helper to parse price (handles both number and string for legacy support)
+                const parsePriceForDiscount = (price) => {
+                    if (!price) return 0;
+                    if (typeof price === 'number') return price;
+                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                    const priceStrLower = price.toString().toLowerCase();
+                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                        priceNum = priceNum * 100000;
+                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                        priceNum = priceNum * 10000000;
+                    }
+                    return priceNum;
+                };
+                const devPrice = parsePriceForDiscount(property.developerPrice);
+                offerPriceNum = parsePriceForDiscount(property.offerPrice);
 
                 if (devPrice > 0 && offerPriceNum > 0 && devPrice > offerPriceNum) {
                     discountAmount = devPrice - offerPriceNum;
@@ -1524,7 +1536,7 @@ const createNotification = async (leadId, notificationType, source, sourceId, ti
             .lean();
 
         if (!lead || !lead.propertyId) {
-            return; 
+            return;
         }
 
         const property = lead.propertyId;
@@ -1801,7 +1813,7 @@ exports.registerVisit = async (req, res) => {
 exports.contactUs = async (req, res, next) => {
     try {
         const { name, email, phone, message, source = "contact_us" } = req.body;
-        const userId = req.user?.userId; 
+        const userId = req.user?.userId;
 
         if (!name || !email || !phone) {
             return res.status(400).json({
@@ -1905,7 +1917,7 @@ exports.contactUs = async (req, res, next) => {
 
         const lead = await leadModal.create({
             userId: leadUserId,
-            propertyId: null, 
+            propertyId: null,
             relationshipManagerId: defaultRM?._id || null,
             rmEmail: defaultRM?.email || '',
             rmPhone: defaultRM?.phone || '',
@@ -1918,12 +1930,12 @@ exports.contactUs = async (req, res, next) => {
         });
 
         if (lead._id) {
-            const activityPerformedBy = defaultRM?._id || leadUserId; 
+            const activityPerformedBy = defaultRM?._id || leadUserId;
             const activityPerformedByName = defaultRM?.name || user?.name || 'System';
 
             await addTimelineActivity(
                 lead._id,
-                'join_group', 
+                'join_group',
                 activityPerformedBy,
                 activityPerformedByName,
                 `${name} contacted us via Contact Us form${message ? `: ${message}` : ''}`,
@@ -2132,7 +2144,7 @@ exports.getBlogById = async (req, res, next) => {
             content: blog.content,
             slug: blog.slug,
             date: formattedDate,
-            views: (blog.views || 0) + 1, 
+            views: (blog.views || 0) + 1,
             createdAt: blog.createdAt,
             updatedAt: blog.updatedAt
         };
@@ -2214,13 +2226,9 @@ exports.compareProperties = async (req, res, next) => {
             const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
             const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
+
             if (property.developerPrice) {
-                let devPrice = parseFloat(property.developerPrice.replace(/[₹,\s]/g, '')) || 0;
-                if (property.developerPrice.toLowerCase().includes('lakh') || property.developerPrice.toLowerCase().includes('l')) {
-                    devPrice = devPrice * 100000;
-                } else if (property.developerPrice.toLowerCase().includes('cr') || property.developerPrice.toLowerCase().includes('crore')) {
-                    devPrice = devPrice * 10000000;
-                }
+                const devPrice = parsePrice(property.developerPrice);
                 if (devPrice > 0) prices.push(devPrice);
             }
 
@@ -2382,10 +2390,10 @@ exports.calculateEMI = async (req, res, next) => {
             const amountStr = loanAmount.toLowerCase().trim();
             if (amountStr.includes('crore') || amountStr.includes('cr')) {
                 const num = parseFloat(amountStr.replace(/[₹,\s]/g, '').replace(/crore|cr/gi, ''));
-                principalAmount = num * 10000000; 
+                principalAmount = num * 10000000;
             } else if (amountStr.includes('lakh') || amountStr.includes('l')) {
                 const num = parseFloat(amountStr.replace(/[₹,\s]/g, '').replace(/lakh|l/gi, ''));
-                principalAmount = num * 100000; 
+                principalAmount = num * 100000;
             } else {
                 principalAmount = parseFloat(amountStr.replace(/[₹,\s]/g, '')) || principalAmount;
             }
