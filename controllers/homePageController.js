@@ -23,6 +23,50 @@ const convertConnectivityToObject = (connectivity) => {
     return {};
 };
 
+// Helper function to get favorite property IDs for a user
+const getFavoritePropertyIds = async (userId) => {
+    if (!userId) return new Set();
+    try {
+        const favorites = await UserPropertyActivity.find({
+            userId: userId,
+            activityType: 'favorite'
+        }).select('propertyId').lean();
+        return new Set(favorites.map(fav => fav.propertyId.toString()));
+    } catch (error) {
+        logError('Error fetching favorite properties', error, { userId });
+        return new Set();
+    }
+};
+
+// Helper function to format property images array (cover first, then by order)
+const formatPropertyImages = (images) => {
+    if (!images || !Array.isArray(images) || images.length === 0) {
+        return [];
+    }
+
+    // Separate cover image and other images
+    const coverImages = images.filter(img => img.isCover === true);
+    const otherImages = images.filter(img => !img.isCover || img.isCover === false);
+
+    // Sort cover images (should only be one, but handle multiple)
+    coverImages.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    // Sort other images by order
+    otherImages.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    // Combine: cover first, then others
+    const sortedImages = [...coverImages, ...otherImages];
+
+    // Return array of image URLs
+    return sortedImages.map(img => {
+        // Handle both object format { url, isCover, order } and string format
+        if (typeof img === 'string') {
+            return img;
+        }
+        return img.url || img;
+    }).filter(Boolean); // Remove any null/undefined values
+};
+
 // Helper function to extract prices from configurations (handles both old and new format)
 // Price is now stored as Number (in rupees), but we handle legacy string format too
 const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
@@ -161,6 +205,13 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         const total = allProperties.length;
         const rawData = allProperties.slice(skip, skip + limit);
 
+        // Get user ID if authenticated
+        const userId = req.user?.userId || null;
+        const isAuthenticated = !!userId;
+
+        // Get favorite property IDs for the user
+        const favoritePropertyIds = await getFavoritePropertyIds(userId);
+
         const developerIds = [...new Set(rawData.map(item => {
             const dev = item.developer;
             if (!dev) return null;
@@ -210,7 +261,8 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             }
             const uniqueUnitTypes = [...new Set(unitTypes)];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
             if (property.possessionDate) {
@@ -266,6 +318,9 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 }
             };
 
+            const propertyId = property._id.toString();
+            const isFavorite = favoritePropertyIds.has(propertyId);
+
             return {
                 id: property._id,
                 projectId: property.projectId,
@@ -273,7 +328,10 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                image: coverImage,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                isFavorite: isFavorite,
+                isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
                 groupSizeFormatted: `${String(property.minGroupMembers || 0).padStart(2, '0')} Members`,
@@ -585,6 +643,13 @@ exports.searchProperties = async (req, res, next) => {
         const total = allProperties.length;
         const paginatedProperties = allProperties.slice(skip, skip + limit);
 
+        // Get user ID if authenticated
+        const userId = req.user?.userId || null;
+        const isAuthenticated = !!userId;
+
+        // Get favorite property IDs for the user
+        const favoritePropertyIds = await getFavoritePropertyIds(userId);
+
         const developerIds = [...new Set(paginatedProperties.map(item => {
             const dev = item.developer;
             if (!dev) return null;
@@ -624,7 +689,8 @@ exports.searchProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations?.map(config => config.unitType).filter(Boolean) || [])];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
             if (property.possessionDate) {
@@ -679,6 +745,9 @@ exports.searchProperties = async (req, res, next) => {
                 }
             };
 
+            const propertyId = property._id.toString();
+            const isFavorite = favoritePropertyIds.has(propertyId);
+
             return {
                 id: property._id,
                 projectId: property.projectId,
@@ -686,7 +755,10 @@ exports.searchProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                image: coverImage,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                isFavorite: isFavorite,
+                isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
                 groupSizeFormatted: `${String(property.minGroupMembers || 0).padStart(2, '0')} Members`,
@@ -721,7 +793,7 @@ exports.searchProperties = async (req, res, next) => {
             };
         });
 
-        const userId = req.user?.userId;
+        // Note: userId already declared above for favorite check
         let searchHistoryData = null;
 
         if (userId && (searchText || city)) {
@@ -928,14 +1000,10 @@ exports.getPropertyById = async (req, res, next) => {
 
         const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-        const sortedImages = property.images?.sort((a, b) => {
-            if (a.isCover) return -1;
-            if (b.isCover) return 1;
-            return (a.order || 0) - (b.order || 0);
-        }) || [];
-
-        const mainImage = sortedImages[0]?.url || null;
-        const thumbnails = sortedImages.slice(1, 5).map(img => img.url);
+        // Format images array (cover first, then by order)
+        const images = formatPropertyImages(property.images);
+        const mainImage = images.length > 0 ? images[0] : null;
+        const thumbnails = images.slice(1, 5);
 
         let possessionDateFormatted = null;
         if (property.possessionDate) {
@@ -956,6 +1024,15 @@ exports.getPropertyById = async (req, res, next) => {
             }
         };
 
+        // Get user ID if authenticated
+        const userId = req.user?.userId || null;
+        const isAuthenticated = !!userId;
+
+        // Check if property is favorited by the user
+        const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        const propertyId = property._id.toString();
+        const isFavorite = favoritePropertyIds.has(propertyId);
+
         const propertyDetails = {
             id: property._id,
             projectId: property.projectId,
@@ -963,6 +1040,8 @@ exports.getPropertyById = async (req, res, next) => {
             location: property.location,
             latitude: property.latitude || null,
             longitude: property.longitude || null,
+            isFavorite: isFavorite,
+            isAuthenticated: isAuthenticated,
             locationDetails: {
                 full: property.location,
                 area: property.location.split(',')[0]?.trim() || property.location,
@@ -1004,14 +1083,11 @@ exports.getPropertyById = async (req, res, next) => {
             rating: 5,
             highlights: property.highlights || [],
             amenities: property.amenities || [],
-            images: {
+            images: images, // Array of all images (cover first, then by order)
+            image: mainImage, // Keep for backward compatibility
+            imageDetails: {
                 main: mainImage,
-                thumbnails: thumbnails,
-                all: sortedImages.map(img => ({
-                    url: img.url,
-                    isCover: img.isCover,
-                    order: img.order
-                }))
+                thumbnails: thumbnails
             },
             layoutPlans: (() => {
                 const layoutPlans = [];
@@ -1388,7 +1464,7 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                 const simMinPrice = simPrices.length > 0 ? Math.min(...simPrices) : 0;
                 const simMaxPrice = simPrices.length > 0 ? Math.max(...simPrices) : 0;
                 const simUnitTypes = [...new Set(prop.configurations.map(config => config.unitType).filter(Boolean))];
-                const coverImage = prop.images?.find(img => img.isCover)?.url || prop.images?.[0]?.url || null;
+                const simImages = formatPropertyImages(prop.images);
                 let openingDate = null;
                 if (prop.possessionDate) {
                     const date = new Date(prop.possessionDate);
@@ -1402,7 +1478,8 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                     id: prop._id,
                     projectId: prop.projectId,
                     projectName: prop.projectName,
-                    imageUrl: coverImage,
+                    images: simImages, // Array of all images (cover first, then by order)
+                    imageUrl: simImages.length > 0 ? simImages[0] : null, // Keep for backward compatibility
                     status: prop.possessionStatus === 'Under Construction'
                         ? (openingDate ? `Opening ${openingDate}` : 'Opening soon')
                         : 'Available',
@@ -2211,7 +2288,26 @@ exports.compareProperties = async (req, res, next) => {
             });
         }
 
-        const formattedProperties = properties.map(property => {
+        // Get user ID if authenticated
+        const userId = req.user?.userId || null;
+        const isAuthenticated = !!userId;
+
+        // Get favorite property IDs for the user
+        const favoritePropertyIds = await getFavoritePropertyIds(userId);
+
+        // Sort properties to match the order of propertyIds in the request
+        // This ensures pin labels (A, B, C) match the order properties were selected
+        const propertyMap = new Map(properties.map(p => [p._id.toString(), p]));
+        const orderedProperties = propertyIds.map(id => propertyMap.get(id.toString())).filter(Boolean);
+
+        // Add pin labels (A, B, C, D...) to each property based on the order they were selected
+        const formattedProperties = orderedProperties.map((property, index) => {
+            // Generate pin label: A, B, C, D, etc. (65 is ASCII for 'A')
+            const pinLabel = String.fromCharCode(65 + index);
+
+            const propertyId = property._id.toString();
+            const isFavorite = favoritePropertyIds.has(propertyId);
+
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -2256,27 +2352,53 @@ exports.compareProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             const floorPlans = [];
+            // Format fullConfigurations with all nested data including layout images
+            const fullConfigurations = [];
+
             if (property.configurations && Array.isArray(property.configurations)) {
                 property.configurations.forEach(config => {
+                    const configData = {
+                        _id: config._id,
+                        unitType: config.unitType,
+                        subConfigurations: []
+                    };
+
                     if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
                         config.subConfigurations.forEach(subConfig => {
+                            const subConfigData = {
+                                _id: subConfig._id,
+                                carpetArea: subConfig.carpetArea,
+                                price: subConfig.price,
+                                availabilityStatus: subConfig.availabilityStatus || 'Available',
+                                layoutPlanImages: subConfig.layoutPlanImages || []
+                            };
+
+                            configData.subConfigurations.push(subConfigData);
+
+                            // Add to floorPlans if layout images exist
                             if (subConfig.layoutPlanImages && subConfig.layoutPlanImages.length > 0) {
                                 subConfig.layoutPlanImages.forEach(imageUrl => {
                                     floorPlans.push({
                                         image: imageUrl,
                                         unitType: config.unitType,
                                         carpetArea: subConfig.carpetArea,
-                                        price: subConfig.price
+                                        price: subConfig.price,
+                                        availabilityStatus: subConfig.availabilityStatus || 'Available'
                                     });
                                 });
                             }
                         });
                     }
+
+                    fullConfigurations.push(configData);
                 });
             }
+
+            // Legacy layouts support (if exists)
             if (property.layouts && Array.isArray(property.layouts)) {
                 property.layouts.forEach(layout => {
                     floorPlans.push({
@@ -2295,6 +2417,17 @@ exports.compareProperties = async (req, res, next) => {
                 });
             }
 
+            // Ensure latitude and longitude are valid numbers
+            const latitude = property.latitude && !isNaN(property.latitude) && isFinite(property.latitude)
+                ? parseFloat(property.latitude) : null;
+            const longitude = property.longitude && !isNaN(property.longitude) && isFinite(property.longitude)
+                ? parseFloat(property.longitude) : null;
+
+            // Check if property has valid map coordinates
+            const hasMapCoordinates = latitude !== null && longitude !== null &&
+                latitude >= -90 && latitude <= 90 &&
+                longitude >= -180 && longitude <= 180;
+
             return {
                 id: property._id,
                 projectId: property.projectId,
@@ -2302,8 +2435,12 @@ exports.compareProperties = async (req, res, next) => {
                 developer: property.developer?.developerName || 'N/A',
                 developerId: property.developer?._id || null,
                 location: property.location,
-                latitude: property.latitude || null,
-                longitude: property.longitude || null,
+                latitude: latitude,
+                longitude: longitude,
+                hasMapCoordinates: hasMapCoordinates, // Flag to indicate if property can be shown on map
+                pinLabel: pinLabel, // A, B, C, D, etc. - Always included for all properties
+                isFavorite: isFavorite,
+                isAuthenticated: isAuthenticated,
                 propertyType: 'Residential',
                 developerPrice: property.developerPrice || null,
                 offerPrice: property.offerPrice || null,
@@ -2324,7 +2461,8 @@ exports.compareProperties = async (req, res, next) => {
                 },
                 configurations: unitTypes,
                 configurationsFormatted: unitTypes.join(', '),
-                mainImage: coverImage,
+                images: images, // Array of all images (cover first, then by order)
+                mainImage: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 floorPlans: floorPlans,
                 possessionDate: property.possessionDate,
                 possessionDateFormatted: possessionDateFormatted,
@@ -2335,20 +2473,41 @@ exports.compareProperties = async (req, res, next) => {
                     email: property.relationshipManager.email,
                     phone: property.relationshipManager.phone
                 } : null,
-                fullConfigurations: property.configurations
+                fullConfigurations: fullConfigurations
             };
         });
 
+        // Log pin labels for debugging
+        const pinLabelsInfo = formattedProperties.map(p => ({
+            id: p.id,
+            projectName: p.projectName,
+            pinLabel: p.pinLabel,
+            hasMapCoordinates: p.hasMapCoordinates,
+            latitude: p.latitude,
+            longitude: p.longitude
+        }));
+
         logInfo('Properties compared', {
             propertyCount: formattedProperties.length,
-            propertyIds: propertyIds
+            propertyIds: propertyIds,
+            pinLabels: pinLabelsInfo
         });
 
         res.json({
             success: true,
             message: 'Properties fetched for comparison',
             data: formattedProperties,
-            count: formattedProperties.length
+            count: formattedProperties.length,
+            // Include metadata about pin labels for frontend
+            metadata: {
+                totalProperties: formattedProperties.length,
+                propertiesWithCoordinates: formattedProperties.filter(p => p.hasMapCoordinates).length,
+                pinLabels: formattedProperties.map(p => ({
+                    id: p.id,
+                    pinLabel: p.pinLabel,
+                    hasMapCoordinates: p.hasMapCoordinates
+                }))
+            }
         });
 
     } catch (error) {
@@ -2485,6 +2644,248 @@ exports.calculateEMI = async (req, res, next) => {
             loanAmount: req.body.loanAmount,
             rateOfInterest: req.body.rateOfInterest,
             loanTenure: req.body.loanTenure
+        });
+        next(error);
+    }
+};
+
+// @desc    Get all properties with search and location-based filtering
+// @route   GET /api/home/properties
+// @access  Public
+exports.getAllProperties = async (req, res, next) => {
+    try {
+        let {
+            page = 1,
+            limit = 12,
+            search,
+            latitude,
+            longitude,
+            radius = 30 // Default 30 km radius
+        } = req.query;
+
+        page = parseInt(page);
+        limit = parseInt(limit);
+        const skip = (page - 1) * limit;
+
+        // Build filter
+        const filter = { isStatus: true };
+
+        // Search by property name if search keyword provided
+        if (search && search.trim()) {
+            filter.projectName = { $regex: search.trim(), $options: 'i' };
+        }
+
+        // Get user ID if authenticated
+        const userId = req.user?.userId || null;
+        const isAuthenticated = !!userId;
+
+        // Get favorite property IDs for the user
+        const favoritePropertyIds = await getFavoritePropertyIds(userId);
+
+        // Get all properties matching the filter
+        let properties = await Property.find(filter)
+            .populate('developer', 'developerName')
+            .populate('relationshipManager', 'name email phone')
+            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer reraId description relationshipManager possessionDate createdAt')
+            .lean();
+
+        // Location-based filtering (30 km radius) if latitude and longitude provided
+        if (latitude && longitude) {
+            const userLat = parseFloat(latitude);
+            const userLon = parseFloat(longitude);
+            const radiusKm = parseFloat(radius) || 30;
+
+            // Validate coordinates
+            if (isNaN(userLat) || isNaN(userLon) || userLat < -90 || userLat > 90 || userLon < -180 || userLon > 180) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid latitude or longitude values"
+                });
+            }
+
+            // Haversine formula to calculate distance between two points
+            const calculateDistance = (lat1, lon1, lat2, lon2) => {
+                const R = 6371; // Earth's radius in kilometers
+                const dLat = (lat2 - lat1) * Math.PI / 180;
+                const dLon = (lon2 - lon1) * Math.PI / 180;
+                const a =
+                    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                return R * c; // Distance in kilometers
+            };
+
+            // Filter properties within radius
+            properties = properties.filter(property => {
+                if (!property.latitude || !property.longitude) {
+                    return false; // Exclude properties without coordinates
+                }
+                const distance = calculateDistance(
+                    userLat,
+                    userLon,
+                    property.latitude,
+                    property.longitude
+                );
+                property.distance = distance; // Add distance to property object
+                return distance <= radiusKm;
+            });
+
+            // Sort by distance (nearest first)
+            properties.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity));
+        }
+
+        // If no search keyword and no location filter, use default listing logic
+        // (sort by lead count or creation date)
+        if (!search && !latitude && !longitude) {
+            // Get lead counts for properties
+            const propertyIds = properties.map(p => p._id);
+            const leadCounts = await leadModal.aggregate([
+                { $match: { propertyId: { $in: propertyIds }, isStatus: true } },
+                { $group: { _id: '$propertyId', count: { $sum: 1 } } }
+            ]);
+
+            const leadCountMap = new Map(
+                leadCounts.map(item => [item._id.toString(), item.count])
+            );
+
+            // Add lead count to properties
+            properties = properties.map(prop => ({
+                ...prop,
+                leadCount: leadCountMap.get(prop._id.toString()) || 0
+            }));
+
+            // Sort by lead count (descending), then by creation date
+            properties.sort((a, b) => {
+                if (b.leadCount !== a.leadCount) {
+                    return b.leadCount - a.leadCount;
+                }
+                return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+            });
+        }
+
+        // Calculate total before pagination
+        const total = properties.length;
+
+        // Apply pagination
+        const paginatedProperties = properties.slice(skip, skip + limit);
+
+        // Format properties for response
+        const formattedProperties = paginatedProperties.map(property => {
+            // Helper to parse price (handles both number and string)
+            const parsePrice = (price) => {
+                if (!price) return 0;
+                if (typeof price === 'number') return price;
+                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                const priceStrLower = price.toString().toLowerCase();
+                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                    priceNum = priceNum * 100000;
+                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                    priceNum = priceNum * 10000000;
+                }
+                return priceNum;
+            };
+
+            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
+            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+
+            // Get unit types
+            const unitTypes = [];
+            if (property.configurations && Array.isArray(property.configurations)) {
+                property.configurations.forEach(config => {
+                    if (config.unitType) {
+                        unitTypes.push(config.unitType);
+                    }
+                });
+            }
+            const uniqueUnitTypes = [...new Set(unitTypes)];
+
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
+
+            const formatPrice = (amount) => {
+                if (!amount || amount === 0) return '₹ 0';
+                if (amount >= 10000000) {
+                    return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
+                } else if (amount >= 100000) {
+                    return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
+                } else {
+                    return `₹ ${amount.toLocaleString('en-IN')}`;
+                }
+            };
+
+            const propertyId = property._id.toString();
+            const isFavorite = favoritePropertyIds.has(propertyId);
+
+            return {
+                id: property._id,
+                projectId: property.projectId,
+                projectName: property.projectName,
+                location: property.location,
+                latitude: property.latitude || null,
+                longitude: property.longitude || null,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                isFavorite: isFavorite,
+                isAuthenticated: isAuthenticated,
+                priceRange: {
+                    min: minPrice,
+                    max: maxPrice,
+                    minFormatted: formatPrice(minPrice),
+                    maxFormatted: formatPrice(maxPrice)
+                },
+                configurations: uniqueUnitTypes,
+                configurationsFormatted: uniqueUnitTypes.join(', '),
+                possessionStatus: property.possessionStatus || 'N/A',
+                developer: property.developer?.developerName || 'N/A',
+                developerPrice: property.developerPrice ? {
+                    value: parsePrice(property.developerPrice),
+                    formatted: formatPrice(parsePrice(property.developerPrice))
+                } : null,
+                offerPrice: property.offerPrice ? {
+                    value: parsePrice(property.offerPrice),
+                    formatted: formatPrice(parsePrice(property.offerPrice))
+                } : null,
+                discountPercentage: property.discountPercentage || "00.00%",
+                minGroupMembers: property.minGroupMembers || 0,
+                reraId: property.reraId,
+                description: property.description,
+                distance: property.distance ? parseFloat(property.distance.toFixed(2)) : null // Distance in km if location filter applied
+            };
+        });
+
+        logInfo('Properties fetched', {
+            total,
+            page,
+            limit,
+            search: search || null,
+            locationFilter: (latitude && longitude) ? { latitude, longitude, radius } : null
+        });
+
+        res.json({
+            success: true,
+            message: "Properties fetched successfully",
+            data: formattedProperties,
+            pagination: {
+                total,
+                page,
+                limit,
+                totalPages: Math.ceil(total / limit),
+                hasMore: (page * limit) < total
+            },
+            filters: {
+                search: search || null,
+                latitude: latitude ? parseFloat(latitude) : null,
+                longitude: longitude ? parseFloat(longitude) : null,
+                radius: radius ? parseFloat(radius) : null
+            }
+        });
+
+    } catch (error) {
+        logError('Error fetching properties', error, {
+            query: req.query
         });
         next(error);
     }
