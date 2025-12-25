@@ -3,7 +3,10 @@ const router = express.Router();
 const { authenticate, optionalAuthenticate } = require('../middleware/auth');
 const homePageController = require('../controllers/homePageController');
 
-router.get('/getTopProperty', homePageController.getTopVisitedProperties);
+router.get('/getTopProperty', optionalAuthenticate, homePageController.getTopVisitedProperties);
+
+// Get all properties with search and location filtering
+router.get('/properties', optionalAuthenticate, homePageController.getAllProperties);
 
 // Get all unique locations
 router.get('/locations', homePageController.getLocations);
@@ -23,7 +26,7 @@ router.post('/property/visit', authenticate, homePageController.registerVisit);
 router.post('/join-group', authenticate, homePageController.joinGroup);
 
 // Property Comparison
-router.post('/compare', homePageController.compareProperties);
+router.post('/compare', optionalAuthenticate, homePageController.compareProperties);
 
 // EMI Calculator
 router.post('/emi-calculator', homePageController.calculateEMI);
