@@ -38,6 +38,35 @@ const getFavoritePropertyIds = async (userId) => {
     }
 };
 
+// Helper function to format property images array (cover first, then by order)
+const formatPropertyImages = (images) => {
+    if (!images || !Array.isArray(images) || images.length === 0) {
+        return [];
+    }
+
+    // Separate cover image and other images
+    const coverImages = images.filter(img => img.isCover === true);
+    const otherImages = images.filter(img => !img.isCover || img.isCover === false);
+
+    // Sort cover images (should only be one, but handle multiple)
+    coverImages.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    // Sort other images by order
+    otherImages.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    // Combine: cover first, then others
+    const sortedImages = [...coverImages, ...otherImages];
+
+    // Return array of image URLs
+    return sortedImages.map(img => {
+        // Handle both object format { url, isCover, order } and string format
+        if (typeof img === 'string') {
+            return img;
+        }
+        return img.url || img;
+    }).filter(Boolean); // Remove any null/undefined values
+};
+
 // Helper function to extract prices from configurations (handles both old and new format)
 // Price is now stored as Number (in rupees), but we handle legacy string format too
 const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
@@ -232,7 +261,8 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             }
             const uniqueUnitTypes = [...new Set(unitTypes)];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
             if (property.possessionDate) {
@@ -298,7 +328,8 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                image: coverImage,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
@@ -658,7 +689,8 @@ exports.searchProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations?.map(config => config.unitType).filter(Boolean) || [])];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
             if (property.possessionDate) {
@@ -723,7 +755,8 @@ exports.searchProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                image: coverImage,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
@@ -967,14 +1000,10 @@ exports.getPropertyById = async (req, res, next) => {
 
         const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-        const sortedImages = property.images?.sort((a, b) => {
-            if (a.isCover) return -1;
-            if (b.isCover) return 1;
-            return (a.order || 0) - (b.order || 0);
-        }) || [];
-
-        const mainImage = sortedImages[0]?.url || null;
-        const thumbnails = sortedImages.slice(1, 5).map(img => img.url);
+        // Format images array (cover first, then by order)
+        const images = formatPropertyImages(property.images);
+        const mainImage = images.length > 0 ? images[0] : null;
+        const thumbnails = images.slice(1, 5);
 
         let possessionDateFormatted = null;
         if (property.possessionDate) {
@@ -1054,14 +1083,11 @@ exports.getPropertyById = async (req, res, next) => {
             rating: 5,
             highlights: property.highlights || [],
             amenities: property.amenities || [],
-            images: {
+            images: images, // Array of all images (cover first, then by order)
+            image: mainImage, // Keep for backward compatibility
+            imageDetails: {
                 main: mainImage,
-                thumbnails: thumbnails,
-                all: sortedImages.map(img => ({
-                    url: img.url,
-                    isCover: img.isCover,
-                    order: img.order
-                }))
+                thumbnails: thumbnails
             },
             layoutPlans: (() => {
                 const layoutPlans = [];
@@ -1438,7 +1464,7 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                 const simMinPrice = simPrices.length > 0 ? Math.min(...simPrices) : 0;
                 const simMaxPrice = simPrices.length > 0 ? Math.max(...simPrices) : 0;
                 const simUnitTypes = [...new Set(prop.configurations.map(config => config.unitType).filter(Boolean))];
-                const coverImage = prop.images?.find(img => img.isCover)?.url || prop.images?.[0]?.url || null;
+                const simImages = formatPropertyImages(prop.images);
                 let openingDate = null;
                 if (prop.possessionDate) {
                     const date = new Date(prop.possessionDate);
@@ -1452,7 +1478,8 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                     id: prop._id,
                     projectId: prop.projectId,
                     projectName: prop.projectName,
-                    imageUrl: coverImage,
+                    images: simImages, // Array of all images (cover first, then by order)
+                    imageUrl: simImages.length > 0 ? simImages[0] : null, // Keep for backward compatibility
                     status: prop.possessionStatus === 'Under Construction'
                         ? (openingDate ? `Opening ${openingDate}` : 'Opening soon')
                         : 'Available',
@@ -2325,7 +2352,8 @@ exports.compareProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             const floorPlans = [];
             // Format fullConfigurations with all nested data including layout images
@@ -2433,7 +2461,8 @@ exports.compareProperties = async (req, res, next) => {
                 },
                 configurations: unitTypes,
                 configurationsFormatted: unitTypes.join(', '),
-                mainImage: coverImage,
+                images: images, // Array of all images (cover first, then by order)
+                mainImage: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 floorPlans: floorPlans,
                 possessionDate: property.possessionDate,
                 possessionDateFormatted: possessionDateFormatted,
@@ -2773,8 +2802,8 @@ exports.getAllProperties = async (req, res, next) => {
             }
             const uniqueUnitTypes = [...new Set(unitTypes)];
 
-            // Get cover image
-            const coverImage = property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null;
+            // Format images array (cover first, then by order)
+            const images = formatPropertyImages(property.images);
 
             const formatPrice = (amount) => {
                 if (!amount || amount === 0) return '₹ 0';
@@ -2797,7 +2826,8 @@ exports.getAllProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                image: coverImage,
+                images: images, // Array of images (cover first, then by order)
+                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isAuthenticated: isAuthenticated,
                 priceRange: {
