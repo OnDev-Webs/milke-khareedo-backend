@@ -76,6 +76,8 @@ router.get('/view_lead_list/:leadId', authenticate, adminController.viewLeadDeta
 router.delete('/delete_lead_list/:leadId', authenticate, adminController.deleteLead);
 // EXPORT lEAD lIST AS CSV
 router.get('/leads/:leadId/export-csv', authenticate, adminController.exportLeadDetailsCSV);
+// EXPORT ALL LEADS AS CSV
+router.get('/export_all_leads_csv', authenticate, adminController.exportAllLeadsCSV);
 
 // Lead Timeline/Activity Routes
 router.post('/lead/:leadId/activity', authenticate, adminController.addLeadActivity);

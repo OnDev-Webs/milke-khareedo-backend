@@ -49,4 +49,30 @@ const uploadToS3 = async (file, folder = "developers") => {
     }
 };
 
-module.exports = { uploadToS3 };
+const uploadBufferToS3 = async (buffer, fileName, folder = "exports", contentType = "text/csv") => {
+    if (!buffer) {
+        throw new Error("No buffer provided");
+    }
+
+    try {
+        const timestamp = Date.now();
+        const fileKey = `${folder}/${timestamp}_${fileName}`;
+
+        const params = {
+            Bucket: process.env.AWS_BUCKET_NAME,
+            Key: fileKey,
+            Body: buffer,
+            ContentType: contentType,
+        };
+
+        await s3.send(new PutObjectCommand(params));
+
+        const url = `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_BUCKET_REGION}.amazonaws.com/${fileKey}`;
+        return url;
+    } catch (error) {
+        console.error('S3 Upload Error:', error);
+        throw new Error(`Failed to upload file to S3: ${error.message}`);
+    }
+};
+
+module.exports = { uploadToS3, uploadBufferToS3 };

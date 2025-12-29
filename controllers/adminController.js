@@ -10,7 +10,7 @@ const leadModal = require("../models/leadModal");
 const LeadActivity = require("../models/leadActivity");
 const Notification = require("../models/notification");
 const Blog = require("../models/blog");
-const { uploadToS3 } = require("../utils/s3");
+const { uploadToS3, uploadBufferToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
 const { sendPasswordSMS } = require("../utils/twilio");
 const { Parser } = require("json2csv");
@@ -1406,8 +1406,29 @@ exports.getLeadsList = async (req, res) => {
     try {
         const userId = req.user.userId;
         const role = req.user.roleName?.toLowerCase();
-        const { page = 1, limit = 10 } = req.query;
+        const { page = 1, limit = 10, search } = req.query;
         let filter = { isStatus: true };
+
+        // Add search by user name if search parameter is provided
+        if (search && search.trim()) {
+            const searchRegex = new RegExp(search.trim(), 'i');
+            const matchingUsers = await User.find({
+                name: { $regex: searchRegex }
+            }).select('_id').lean();
+
+            const matchingUserIds = matchingUsers.map(u => u._id);
+            if (matchingUserIds.length > 0) {
+                filter.userId = { $in: matchingUserIds };
+            } else {
+                // If no users match, return empty results
+                return res.json({
+                    success: true,
+                    message: "Lead list fetched successfully",
+                    data: [],
+                    pagination: { total: 0, page: Number(page), limit: Number(limit), totalPages: 0 }
+                });
+            }
+        }
 
         if (role !== 'admin' && role !== 'super admin') {
             const properties = await Property.find({
@@ -1487,6 +1508,7 @@ exports.getLeadsList = async (req, res) => {
                 userName: user.name || 'N/A',
                 email: user.email || 'N/A',
                 phoneNumber: formatPhone(user),
+                profileImage: user.profileImage || null,
                 projectId: property.projectId || 'N/A',
                 status: item.status || 'lead_received',
                 dateTime: formatDateTime(item.createdAt),
@@ -1728,6 +1750,7 @@ exports.viewLeadDetails = async (req, res) => {
             leadName: user.name || 'N/A',
             date: formatDate(lead.createdAt || lead.date),
             phoneNumber: formatPhone(user),
+            profileImage: user.profileImage || null,
             projectId: property ? (property.projectId || 'N/A') : 'N/A',
             source: lead.source || 'origin',
             ipAddress: lead.ipAddress || 'N/A',
@@ -1841,6 +1864,251 @@ exports.exportLeadDetailsCSV = async (req, res) => {
         res.send(csv);
     } catch (error) {
         console.error(error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== EXPORT ALL LEADS TO CSV =====================
+// @desc    Export all leads data with timeline to CSV and upload to S3
+// @route   GET /api/admin/export_all_leads_csv
+// @access  Private (Admin/Agent)
+exports.exportAllLeadsCSV = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const role = req.user.roleName?.toLowerCase();
+        const { search } = req.query;
+        let filter = { isStatus: true };
+
+        // Add search by user name if search parameter is provided
+        if (search && search.trim()) {
+            const searchRegex = new RegExp(search.trim(), 'i');
+            const matchingUsers = await User.find({
+                name: { $regex: searchRegex }
+            }).select('_id').lean();
+
+            const matchingUserIds = matchingUsers.map(u => u._id);
+            if (matchingUserIds.length > 0) {
+                filter.userId = { $in: matchingUserIds };
+            } else {
+                return res.json({
+                    success: true,
+                    message: "No leads found for export",
+                    csvUrl: null,
+                    totalLeads: 0
+                });
+            }
+        }
+
+        // Apply role-based filters
+        if (role !== 'admin' && role !== 'super admin') {
+            const properties = await Property.find({
+                isStatus: true,
+                $or: [
+                    { relationshipManager: userId },
+                    { leadDistributionAgents: userId }
+                ]
+            }).select('_id').lean();
+
+            const propertyIds = properties.map(p => p._id);
+
+            if (role === 'project manager') {
+                filter.$or = [
+                    { propertyId: { $in: propertyIds } },
+                    { relationshipManagerId: userId }
+                ];
+            }
+
+            if (role === 'agent') {
+                if (!propertyIds.length) {
+                    return res.json({
+                        success: true,
+                        message: "No leads found for export",
+                        csvUrl: null,
+                        totalLeads: 0
+                    });
+                }
+                filter.propertyId = { $in: propertyIds };
+            }
+        }
+
+        // Get all leads without pagination
+        const leads = await leadModal.find(filter)
+            .populate({
+                path: "propertyId",
+                select: "projectName projectId location possessionDate configurations amenities relationshipManager",
+                populate: {
+                    path: "relationshipManager",
+                    select: "name email phone"
+                }
+            })
+            .populate("userId", "name email phoneNumber countryCode profileImage")
+            .populate("relationshipManagerId", "name email phone")
+            .sort({ createdAt: -1 })
+            .lean();
+
+        if (!leads || leads.length === 0) {
+            return res.json({
+                success: true,
+                message: "No leads found for export",
+                csvUrl: null,
+                totalLeads: 0
+            });
+        }
+
+        // Get all lead IDs to fetch timelines in batch
+        const leadIds = leads.map(lead => lead._id);
+        const allTimelines = await LeadActivity.find({ leadId: { $in: leadIds } })
+            .populate("performedBy", "name email")
+            .sort({ activityDate: -1 })
+            .lean();
+
+        // Group timelines by leadId
+        const timelinesByLeadId = {};
+        allTimelines.forEach(activity => {
+            const leadIdStr = activity.leadId.toString();
+            if (!timelinesByLeadId[leadIdStr]) {
+                timelinesByLeadId[leadIdStr] = [];
+            }
+            timelinesByLeadId[leadIdStr].push(activity);
+        });
+
+        // Helper functions
+        const formatPhone = (user) => {
+            if (!user || !user.phoneNumber) return 'N/A';
+            const countryCode = user.countryCode || '+91';
+            const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+            if (phoneDigits.length === 10) {
+                return `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+            }
+            return `${countryCode} ${user.phoneNumber}`;
+        };
+
+        const formatDate = (date) => {
+            if (!date) return 'N/A';
+            return new Date(date).toLocaleString('en-IN');
+        };
+
+        const formatStatus = (status) => {
+            const statusMap = {
+                'lead_received': 'Lead Received',
+                'interested': 'Interested',
+                'no_response_dnp': 'No Response - Do Not Pick (DNP)',
+                'unable_to_contact': 'Unable to Contact',
+                'call_back_scheduled': 'Call Back Scheduled',
+                'demo_discussion_ongoing': 'Demo Discussion Ongoing',
+                'site_visit_coordination': 'Site Visit Coordination in Progress',
+                'site_visit_confirmed': 'Site Visit Confirmed',
+                'commercial_negotiation': 'Commercial Negotiation',
+                'deal_closed': 'Deal Closed',
+                'declined_interest': 'Declined Interest',
+                'does_not_meet_requirements': 'Does Not Meet Requirements',
+                'pending': 'Pending',
+                'approved': 'Approved',
+                'rejected': 'Rejected'
+            };
+            return statusMap[status] || status;
+        };
+
+        // Format data for CSV
+        const csvData = leads.map(lead => {
+            const user = lead.userId || {};
+            const property = lead.propertyId || {};
+            const timeline = timelinesByLeadId[lead._id.toString()] || [];
+
+            // Format timeline activities
+            const timelineFormatted = timeline.map(t => {
+                const activityInfo = {
+                    type: t.activityType || 'N/A',
+                    performedBy: t.performedBy?.name || 'System',
+                    date: formatDate(t.activityDate),
+                    oldStatus: t.oldStatus || '',
+                    newStatus: t.newStatus || '',
+                    description: t.description || ''
+                };
+                return `${activityInfo.type} by ${activityInfo.performedBy} on ${activityInfo.date}${activityInfo.oldStatus && activityInfo.newStatus ? ` (${activityInfo.oldStatus} → ${activityInfo.newStatus})` : ''}`;
+            }).join(' | ');
+
+            // Format configurations
+            const configurationsFormatted = (property.configurations || []).map(cfg => {
+                if (typeof cfg === 'number') {
+                    if (cfg >= 10000000) return `₹ ${(cfg / 10000000).toFixed(2)} Cr`;
+                    if (cfg >= 100000) return `₹ ${(cfg / 100000).toFixed(2)} Lakh`;
+                    return `₹ ${cfg}`;
+                }
+
+                const bhk = cfg.unitType || cfg.bhk || '';
+                const area = cfg.area || cfg.size || cfg.carpetArea || '';
+                const price = cfg.price
+                    ? (cfg.price >= 10000000
+                        ? `₹ ${(cfg.price / 10000000).toFixed(2)} Cr`
+                        : `₹ ${(cfg.price / 100000).toFixed(2)} Lakh`)
+                    : '';
+
+                return [bhk, area, price].filter(Boolean).join(' - ');
+            }).join(' | ');
+
+            return {
+                Lead_ID: lead._id.toString(),
+                Lead_Status: formatStatus(lead.status || 'lead_received'),
+                Lead_Status_Value: lead.status || 'lead_received',
+                Lead_Source: lead.source || 'origin',
+                Created_At: formatDate(lead.createdAt),
+                Updated_At: formatDate(lead.updatedAt),
+                Visit_Status: lead.visitStatus || 'not_visited',
+
+                User_Name: user.name || 'N/A',
+                User_Email: user.email || 'N/A',
+                User_Phone: formatPhone(user),
+                User_Profile_Image: user.profileImage || 'N/A',
+
+                Project_ID: property.projectId || 'N/A',
+                Project_Name: property.projectName || 'N/A',
+                Location: property.location || 'N/A',
+                Possession_Date: formatDate(property.possessionDate),
+
+                RM_Name: property.relationshipManager?.name || lead.relationshipManagerId?.name || 'N/A',
+                RM_Email: property.relationshipManager?.email || lead.relationshipManagerId?.email || 'N/A',
+                RM_Phone: property.relationshipManager?.phone || lead.relationshipManagerId?.phone || 'N/A',
+
+                Amenities: (property.amenities || []).join(' | '),
+                Configurations: configurationsFormatted,
+
+                Remark: lead.message || '',
+                IP_Address: lead.ipAddress || 'N/A',
+                RM_Email_Direct: lead.rmEmail || '',
+                RM_Phone_Direct: lead.rmPhone || '',
+
+                Timeline_Count: timeline.length,
+                Timeline_Activities: timelineFormatted || 'No activities'
+            };
+        });
+
+        // Generate CSV
+        const fields = Object.keys(csvData[0]);
+        const parser = new Parser({ fields });
+        const csv = parser.parse(csvData);
+
+        // Upload CSV to S3
+        const fileName = `all_leads_export_${Date.now()}.csv`;
+        const csvUrl = await uploadBufferToS3(
+            Buffer.from(csv, 'utf-8'),
+            fileName,
+            'leads/exports',
+            'text/csv'
+        );
+
+        logInfo('All leads exported to CSV', { userId, totalLeads: leads.length, csvUrl });
+
+        res.json({
+            success: true,
+            message: "Leads exported successfully",
+            csvUrl: csvUrl,
+            totalLeads: leads.length,
+            exportedAt: new Date().toISOString()
+        });
+
+    } catch (error) {
+        logError('Error exporting all leads to CSV', error, { userId: req.user?.userId });
         res.status(500).json({ success: false, message: error.message });
     }
 };
