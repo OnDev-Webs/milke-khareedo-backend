@@ -2069,7 +2069,6 @@ exports.getAllBlogs = async (req, res, next) => {
         const {
             page = 1,
             limit = 10,
-            category,
             tag,
             search,
             sortBy = 'newest' // newest, oldest, views
@@ -2082,10 +2081,6 @@ exports.getAllBlogs = async (req, res, next) => {
             isPublished: true
         };
 
-        if (category) {
-            filter.category = { $regex: category, $options: 'i' };
-        }
-
         if (tag) {
             filter.tags = { $in: [new RegExp(tag, 'i')] };
         }
@@ -2093,9 +2088,7 @@ exports.getAllBlogs = async (req, res, next) => {
         if (search) {
             filter.$or = [
                 { title: { $regex: search, $options: 'i' } },
-                { subtitle: { $regex: search, $options: 'i' } },
                 { content: { $regex: search, $options: 'i' } },
-                { category: { $regex: search, $options: 'i' } },
                 { tags: { $in: [new RegExp(search, 'i')] } }
             ];
         }
@@ -2115,7 +2108,7 @@ exports.getAllBlogs = async (req, res, next) => {
 
         const blogs = await Blog.find(filter)
             .populate('author', 'name profileImage')
-            .select('title subtitle category author authorName tags bannerImage slug views createdAt')
+            .select('title author authorName tags bannerImage slug views createdAt')
             .sort(sortCriteria)
             .skip(skip)
             .limit(parseInt(limit))
@@ -2132,8 +2125,6 @@ exports.getAllBlogs = async (req, res, next) => {
             return {
                 _id: blog._id,
                 title: blog.title,
-                subtitle: blog.subtitle || '',
-                category: blog.category || '',
                 author: blog.authorName || blog.author?.name || 'Admin',
                 authorImage: blog.author?.profileImage || null,
                 tags: blog.tags || [],
@@ -2145,7 +2136,7 @@ exports.getAllBlogs = async (req, res, next) => {
             };
         });
 
-        logInfo('Blogs fetched for homepage', { total, page, limit, category, tag });
+        logInfo('Blogs fetched for homepage', { total, page, limit, tag });
 
         res.json({
             success: true,
@@ -2208,8 +2199,6 @@ exports.getBlogById = async (req, res, next) => {
         const formattedBlog = {
             _id: blog._id,
             title: blog.title,
-            subtitle: blog.subtitle || '',
-            category: blog.category || '',
             author: {
                 id: blog.author?._id || blog.author,
                 name: blog.authorName || blog.author?.name || 'Admin',
@@ -2218,7 +2207,6 @@ exports.getBlogById = async (req, res, next) => {
             },
             tags: blog.tags || [],
             bannerImage: blog.bannerImage || null,
-            galleryImages: blog.galleryImages || [],
             content: blog.content,
             slug: blog.slug,
             date: formattedDate,

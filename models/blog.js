@@ -6,14 +6,6 @@ const blogSchema = new mongoose.Schema({
         required: [true, 'Please provide a blog title'],
         trim: true
     },
-    subtitle: {
-        type: String,
-        trim: true
-    },
-    category: {
-        type: String,
-        trim: true
-    },
     author: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -31,9 +23,6 @@ const blogSchema = new mongoose.Schema({
         type: String,
         default: null
     },
-    galleryImages: [{
-        type: String
-    }],
     content: {
         type: String,
         required: [true, 'Please provide blog content']
@@ -77,7 +66,6 @@ blogSchema.pre('save', function (next) {
 // Index for faster queries
 blogSchema.index({ slug: 1 });
 blogSchema.index({ isPublished: 1, isStatus: 1 });
-blogSchema.index({ category: 1 });
 blogSchema.index({ author: 1 });
 blogSchema.index({ createdAt: -1 });
 

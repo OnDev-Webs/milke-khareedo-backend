@@ -172,8 +172,9 @@ exports.adminLogin = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
-                    name: user.name,
+                    name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
                     email: user.email,
+                    profileImage: user.profileImage || null,
                     role: {
                         id: user.role._id,
                         name: user.role.name,
@@ -4317,8 +4318,6 @@ exports.createBlog = async (req, res, next) => {
     try {
         const {
             title,
-            subtitle,
-            category,
             tags,
             content,
             isPublished
@@ -4362,25 +4361,6 @@ exports.createBlog = async (req, res, next) => {
             bannerImageUrl = req.body.bannerImage;
         }
 
-        let galleryImageUrls = [];
-        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
-            try {
-                const uploadPromises = req.files.galleryImages.map(file =>
-                    uploadToS3(file, 'blogs/gallery')
-                );
-                galleryImageUrls = await Promise.all(uploadPromises);
-            } catch (uploadError) {
-                logError('Error uploading gallery images', uploadError);
-            }
-        } else if (req.body.galleryImages) {
-            const galleryImagesData = typeof req.body.galleryImages === 'string'
-                ? JSON.parse(req.body.galleryImages)
-                : req.body.galleryImages;
-            if (Array.isArray(galleryImagesData)) {
-                galleryImageUrls = galleryImagesData;
-            }
-        }
-
         const slug = title
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, '-')
@@ -4394,13 +4374,10 @@ exports.createBlog = async (req, res, next) => {
 
         const blog = await Blog.create({
             title,
-            subtitle: subtitle || '',
-            category: category || '',
             author,
             authorName,
             tags: tagsArray,
             bannerImage: bannerImageUrl,
-            galleryImages: galleryImageUrls,
             content,
             slug: finalSlug,
             isPublished: isPublished === 'true' || isPublished === true
@@ -4441,7 +4418,6 @@ exports.getAllBlogs = async (req, res, next) => {
             filter.$or = [
                 { title: { $regex: search, $options: 'i' } },
                 { authorName: { $regex: search, $options: 'i' } },
-                { category: { $regex: search, $options: 'i' } },
                 { tags: { $in: [new RegExp(search, 'i')] } }
             ];
         }
@@ -4458,8 +4434,6 @@ exports.getAllBlogs = async (req, res, next) => {
         const formattedBlogs = blogs.map(blog => ({
             _id: blog._id,
             title: blog.title,
-            subtitle: blog.subtitle || '',
-            category: blog.category || '',
             author: blog.authorName || blog.author?.name || 'Admin',
             authorId: blog.author?._id || blog.author,
             tags: blog.tags || [],
@@ -4535,8 +4509,6 @@ exports.updateBlog = async (req, res, next) => {
         const { id } = req.params;
         const {
             title,
-            subtitle,
-            category,
             tags,
             content,
             isPublished
@@ -4563,8 +4535,6 @@ exports.updateBlog = async (req, res, next) => {
             updates.slug = slugExists ? `${slug}-${Date.now()}` : slug;
         }
 
-        if (subtitle !== undefined) updates.subtitle = subtitle;
-        if (category !== undefined) updates.category = category;
         if (content !== undefined) updates.content = content;
         if (isPublished !== undefined) {
             updates.isPublished = isPublished === 'true' || isPublished === true;
@@ -4596,25 +4566,6 @@ exports.updateBlog = async (req, res, next) => {
             }
         } else if (req.body.bannerImage !== undefined) {
             updates.bannerImage = req.body.bannerImage || null;
-        }
-
-        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
-            try {
-                const uploadPromises = req.files.galleryImages.map(file =>
-                    uploadToS3(file, 'blogs/gallery')
-                );
-                const newGalleryImages = await Promise.all(uploadPromises);
-                updates.galleryImages = [...(existingBlog.galleryImages || []), ...newGalleryImages];
-            } catch (uploadError) {
-                logError('Error uploading gallery images', uploadError);
-            }
-        } else if (req.body.galleryImages !== undefined) {
-            const galleryImagesData = typeof req.body.galleryImages === 'string'
-                ? JSON.parse(req.body.galleryImages)
-                : req.body.galleryImages;
-            if (Array.isArray(galleryImagesData)) {
-                updates.galleryImages = galleryImagesData;
-            }
         }
 
         const updatedBlog = await Blog.findByIdAndUpdate(

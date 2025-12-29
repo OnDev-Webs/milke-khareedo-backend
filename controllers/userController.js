@@ -427,6 +427,7 @@ exports.verifyOTP = async (req, res, next) => {
                     email: user.email,
                     phoneNumber: user.phoneNumber,
                     countryCode: user.countryCode,
+                    profileImage: user.profileImage || null,
                     isPhoneVerified: user.isPhoneVerified,
                     role: user.role ? {
                         id: user.role._id,

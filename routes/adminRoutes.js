@@ -108,8 +108,7 @@ router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminContro
 
 // BLOG MANAGEMENT ROUTES (with permission checks)
 router.post('/blog', authenticate, upload.fields([
-    { name: 'bannerImage', maxCount: 1 },
-    { name: 'galleryImages', maxCount: 10 }
+    { name: 'bannerImage', maxCount: 1 }
 ]), authorizeBlogAdd, adminController.createBlog);
 
 router.get('/blogs', authenticate, authorizeBlogView, adminController.getAllBlogs);
@@ -117,8 +116,7 @@ router.get('/blogs', authenticate, authorizeBlogView, adminController.getAllBlog
 router.get('/blog/:id', authenticate, authorizeBlogView, adminController.getBlogById);
 
 router.put('/blog/:id', authenticate, upload.fields([
-    { name: 'bannerImage', maxCount: 1 },
-    { name: 'galleryImages', maxCount: 10 }
+    { name: 'bannerImage', maxCount: 1 }
 ]), authorizeBlogEdit, adminController.updateBlog);
 router.delete('/blog/:id', authenticate, authorizeBlogDelete, adminController.deleteBlog);
 
