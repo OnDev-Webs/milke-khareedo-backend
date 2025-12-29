@@ -78,7 +78,7 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 // Start server
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3008;
 app.listen(PORT, () => {
     logInfo(`Server is running on port ${PORT}`, {
         environment: process.env.NODE_ENV || 'development',

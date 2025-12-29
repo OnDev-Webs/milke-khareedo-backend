@@ -24,7 +24,7 @@ router.get('/', (req, res) => {
         endpoints: {
             users: '/api/users',
             products: '/api/products',
-            property: '/api/property',
+            admin : '/api/admin'
         }
     });
 });
