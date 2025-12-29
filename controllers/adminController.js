@@ -172,8 +172,9 @@ exports.adminLogin = async (req, res, next) => {
             data: {
                 user: {
                     id: user._id,
-                    name: user.name,
+                    name: user.name || `${user.firstName || ''} ${user.lastName || ''}`.trim(),
                     email: user.email,
+                    profileImage: user.profileImage || null,
                     role: {
                         id: user.role._id,
                         name: user.role.name,
@@ -1036,159 +1037,163 @@ exports.getPropertyById = async (req, res, next) => {
 exports.updateProperty = async (req, res, next) => {
     try {
         const allowedFields = [
-            'projectName', 'developer', 'location', 'latitude', 'longitude', 'projectSize', 'landParcel',
-            'possessionDate', 'developerPrice', 'offerPrice', 'minGroupMembers',
-            'reraId', 'possessionStatus', 'description',
-            'configurations', 'highlights', 'amenities',
-            'connectivity', 'relationshipManager', 'leadDistributionAgents', 'isStatus'
+            "projectName",
+            "developer",
+            "location",
+            "latitude",
+            "longitude",
+            "projectSize",
+            "landParcel",
+            "possessionDate",
+            "developerPrice",
+            "offerPrice",
+            "minGroupMembers",
+            "reraId",
+            "possessionStatus",
+            "description",
+            "configurations",
+            "highlights",
+            "amenities",
+            "connectivity",
+            "relationshipManager",
+            "leadDistributionAgents",
+            "isStatus",
         ];
+
+        const filesMap = {};
+        if (Array.isArray(req.files)) {
+            req.files.forEach((file) => {
+                if (!filesMap[file.fieldname]) {
+                    filesMap[file.fieldname] = [];
+                }
+                filesMap[file.fieldname].push(file);
+            });
+        }
 
         const updates = {};
 
-        allowedFields.forEach(field => {
-            if (req.body[field] !== undefined) updates[field] = req.body[field];
+        allowedFields.forEach((field) => {
+            const value = req.body[field];
+
+            if (
+                value !== undefined &&
+                value !== null &&
+                value !== "" &&
+                value !== "[]" &&
+                value !== "{}"
+            ) {
+                updates[field] = value;
+            }
         });
 
         const safeJSON = (value, fallback) => {
             try {
                 if (!value) return fallback;
-                if (typeof value === 'object') return value;
+                if (typeof value === "object") return value;
                 return JSON.parse(value);
             } catch {
                 return fallback;
             }
         };
 
-        updates.configurations = safeJSON(req.body.configurations, []);
-        updates.highlights = safeJSON(req.body.highlights, []);
-        updates.amenities = safeJSON(req.body.amenities, []);
+        if (req.body.configurations)
+            updates.configurations = safeJSON(req.body.configurations, []);
 
-        const layoutImagesMapping = safeJSON(req.body.layoutImagesMapping, {});
+        if (req.body.highlights)
+            updates.highlights = safeJSON(req.body.highlights, []);
+
+        if (req.body.amenities)
+            updates.amenities = safeJSON(req.body.amenities, []);
+
+        if (req.body.leadDistributionAgents)
+            updates.leadDistributionAgents = safeJSON(
+                req.body.leadDistributionAgents,
+                []
+            );
 
         const parsePriceToNumber = (priceStr) => {
             if (!priceStr) return 0;
-            if (typeof priceStr === 'number') return priceStr;
-            let priceNum = parseFloat(priceStr.toString().replace(/[₹,\s]/g, '')) || 0;
-            const priceStrLower = priceStr.toString().toLowerCase();
-            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                priceNum = priceNum * 100000;
-            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                priceNum = priceNum * 10000000;
-            }
+            if (typeof priceStr === "number") return priceStr;
+
+            let priceNum =
+                parseFloat(priceStr.toString().replace(/[₹,\s]/g, "")) || 0;
+
+            const lower = priceStr.toString().toLowerCase();
+            if (lower.includes("lakh") || lower.includes("l"))
+                priceNum *= 100000;
+            else if (lower.includes("cr") || lower.includes("crore"))
+                priceNum *= 10000000;
+
             return priceNum;
         };
 
-        if (updates.configurations && Array.isArray(updates.configurations)) {
-            for (let configIndex = 0; configIndex < updates.configurations.length; configIndex++) {
-                const config = updates.configurations[configIndex];
-                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
-                    for (let subIndex = 0; subIndex < config.subConfigurations.length; subIndex++) {
-                        const subConfig = config.subConfigurations[subIndex];
-                        if (subConfig.price) {
-                            subConfig.price = parsePriceToNumber(subConfig.price);
-                        }
-                    }
-                }
-            }
-        }
-        if (req.body.connectivity !== undefined) {
-            const connectivityData = safeJSON(req.body.connectivity, {});
-            let connectivityMap = new Map();
-            if (connectivityData && typeof connectivityData === 'object') {
-                Object.keys(connectivityData).forEach(key => {
-                    if (Array.isArray(connectivityData[key])) {
-                        connectivityMap.set(key, connectivityData[key]);
-                    }
-                });
-            }
-            updates.connectivity = connectivityMap.size > 0 ? connectivityMap : new Map();
-        }
-        updates.leadDistributionAgents = safeJSON(req.body.leadDistributionAgents, []);
-
-        if (updates.developerPrice) {
+        if (updates.developerPrice)
             updates.developerPrice = parsePriceToNumber(updates.developerPrice);
-        }
-        if (updates.offerPrice) {
+
+        if (updates.offerPrice)
             updates.offerPrice = parsePriceToNumber(updates.offerPrice);
-        }
 
         if (updates.developerPrice || updates.offerPrice) {
-            const currentProperty = await Property.findById(req.params.id).select('developerPrice offerPrice').lean();
-            const devPrice = updates.developerPrice !== undefined ? updates.developerPrice : (currentProperty?.developerPrice || 0);
-            const offerPrice = updates.offerPrice !== undefined ? updates.offerPrice : (currentProperty?.offerPrice || 0);
+            const current = await Property.findById(req.params.id)
+                .select("developerPrice offerPrice")
+                .lean();
 
-            const calculateDiscountPercentage = (devPrice, offerPrice) => {
-                if (!devPrice || !offerPrice) return "00.00%";
-                const devPriceNum = typeof devPrice === 'number' ? devPrice : parsePriceToNumber(devPrice);
-                const offerPriceNum = typeof offerPrice === 'number' ? offerPrice : parsePriceToNumber(offerPrice);
-                if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
-                    const discount = ((devPriceNum - offerPriceNum) / devPriceNum) * 100;
-                    return `${discount.toFixed(2)}%`;
+            const devPrice =
+                updates.developerPrice ?? current?.developerPrice ?? 0;
+            const offerPrice =
+                updates.offerPrice ?? current?.offerPrice ?? 0;
+
+            if (devPrice > 0 && offerPrice > 0 && devPrice > offerPrice) {
+                const discount = ((devPrice - offerPrice) / devPrice) * 100;
+                updates.discountPercentage = `${discount.toFixed(2)}%`;
+            }
+        }
+
+        if (req.body.developer) {
+            updates.developer = safeJSON(req.body.developer, null);
+        }
+
+        if (req.body.isStatus !== undefined) {
+            updates.isStatus = req.body.isStatus === "true";
+        }
+        if (req.body.connectivity) {
+            const connectivityData = safeJSON(req.body.connectivity, {});
+            const connectivityMap = new Map();
+
+            Object.keys(connectivityData || {}).forEach((key) => {
+                if (Array.isArray(connectivityData[key])) {
+                    connectivityMap.set(key, connectivityData[key]);
                 }
-                return "00.00%";
-            };
-
-            updates.discountPercentage = calculateDiscountPercentage(devPrice, offerPrice);
-        }
-
-        if (updates.relationshipManager) {
-            const projectManagerRole = await Role.findOne({ name: "Project Manager" });
-            if (!projectManagerRole) {
-                return res.status(400).json({ success: false, message: "Role 'Project Manager' not found" });
-            }
-
-            const rm = await User.findOne({
-                _id: updates.relationshipManager,
-                role: projectManagerRole._id
-            });
-            if (!rm) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Invalid Relationship Manager (must have role 'Project Manager')"
-                });
-            }
-        }
-
-        if (updates.leadDistributionAgents.length > 0) {
-            const agentRole = await Role.findOne({ name: "Agent" });
-            if (!agentRole) {
-                return res.status(400).json({ success: false, message: "Role 'Agent' not found" });
-            }
-
-            const validAgents = await User.find({
-                _id: { $in: updates.leadDistributionAgents },
-                role: agentRole._id
             });
 
-            if (validAgents.length !== updates.leadDistributionAgents.length) {
-                return res.status(400).json({
-                    success: false,
-                    message: "All lead distribution agents must have role 'Agent'"
-                });
+            if (connectivityMap.size > 0) {
+                updates.connectivity = Object.fromEntries(connectivityMap);
             }
         }
 
-        let uploadedImages = [];
-        let uploadedLayouts = [];
-        let uploadedQrImage = null;
+        if (filesMap.images && filesMap.images.length > 0) {
+            const existing = await Property.findById(req.params.id)
+                .select("images")
+                .lean();
 
-        if (req.files?.images) {
-            for (let i = 0; i < req.files.images.length; i++) {
-                const url = await uploadToS3(req.files.images[i]);
+            const uploadedImages = [];
+
+            for (let i = 0; i < filesMap.images.length; i++) {
+                const url = await uploadToS3(filesMap.images[i]);
                 uploadedImages.push({
                     url,
                     isCover: false,
-                    order: i + 1
+                    order: (existing?.images?.length || 0) + i + 1,
                 });
             }
-            updates.images = uploadedImages;
+
+            updates.images = [...(existing?.images || []), ...uploadedImages];
         }
 
-        if (req.files?.reraQrImage) {
-            uploadedQrImage = await uploadToS3(req.files.reraQrImage[0]);
-            updates.reraQrImage = uploadedQrImage;
+        if (filesMap.reraQrImage?.[0]) {
+            const qrUrl = await uploadToS3(filesMap.reraQrImage[0]);
+            updates.reraQrImage = qrUrl;
         }
-
 
         const property = await Property.findByIdAndUpdate(
             req.params.id,
@@ -1196,24 +1201,20 @@ exports.updateProperty = async (req, res, next) => {
             { new: true, runValidators: true }
         );
 
-        if (!property)
+        if (!property) {
             return res.status(404).json({
                 success: false,
-                message: 'Property not found'
+                message: "Property not found",
             });
+        }
 
         res.json({
             success: true,
-            message: 'Property updated successfully',
-            data: property
+            message: "Property updated successfully",
+            data: property,
         });
-
     } catch (error) {
-        logError('Error updating property', error, {
-            propertyId: req.params.id,
-            projectName: updates.projectName || req.body.projectName,
-            developer: updates.developer || req.body.developer
-        });
+        console.error("Error updating property:", error);
         next(error);
     }
 };
@@ -2828,8 +2829,13 @@ exports.updateAssignUser = async (req, res) => {
     try {
         const { name, email, phone, role } = req.body;
 
+        let profileImage;
+        if (req.file) {
+            profileImage = await uploadToS3(req.file);
+        }
+
         if (email) {
-            if (!email.includes('@')) {
+            if (!email.includes("@")) {
                 return res.status(400).json({
                     success: false,
                     message: "Invalid email format"
@@ -2837,24 +2843,13 @@ exports.updateAssignUser = async (req, res) => {
             }
 
             const blockedDomains = [
-                'gmail.com',
-                'yahoo.com',
-                'hotmail.com',
-                'outlook.com',
-                'live.com',
-                'msn.com',
-                'aol.com',
-                'icloud.com',
-                'mail.com',
-                'protonmail.com',
-                'yandex.com',
-                'zoho.com',
-                'rediffmail.com',
-                'inbox.com',
-                'gmx.com'
+                "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
+                "live.com", "msn.com", "aol.com", "icloud.com",
+                "mail.com", "protonmail.com", "yandex.com",
+                "zoho.com", "rediffmail.com", "inbox.com", "gmx.com"
             ];
 
-            const emailDomain = email.split('@')[1]?.toLowerCase().trim();
+            const emailDomain = email.split("@")[1]?.toLowerCase().trim();
             if (!emailDomain) {
                 return res.status(400).json({
                     success: false,
@@ -2865,14 +2860,15 @@ exports.updateAssignUser = async (req, res) => {
             if (blockedDomains.includes(emailDomain)) {
                 return res.status(400).json({
                     success: false,
-                    message: "Personal email addresses are not allowed. Please use a business/domain email address."
+                    message:
+                        "Personal email addresses are not allowed. Please use a business/domain email address."
                 });
             }
 
             const existingUser = await User.findOne({
                 email: email.toLowerCase().trim(),
                 _id: { $ne: req.params.id }
-            }).select('email').lean();
+            }).select("_id");
 
             if (existingUser) {
                 return res.status(400).json({
@@ -2883,7 +2879,7 @@ exports.updateAssignUser = async (req, res) => {
         }
 
         if (role) {
-            const roleExists = await Role.findById(role).select('_id name').lean();
+            const roleExists = await Role.findById(role).select("_id");
             if (!roleExists) {
                 return res.status(400).json({
                     success: false,
@@ -2897,12 +2893,15 @@ exports.updateAssignUser = async (req, res) => {
         if (email) updates.email = email.toLowerCase().trim();
         if (phone) updates.phone = phone;
         if (role) updates.role = role;
+        if (profileImage) updates.profileImage = profileImage;
 
         const user = await User.findByIdAndUpdate(
             req.params.id,
             updates,
             { new: true, runValidators: true }
-        ).select('-password').populate('role', 'name permissions');
+        )
+            .select("-password")
+            .populate("role", "name permissions");
 
         if (!user) {
             return res.status(404).json({
@@ -2911,9 +2910,10 @@ exports.updateAssignUser = async (req, res) => {
             });
         }
 
-        logInfo('User updated by admin', {
+        logInfo("User updated by admin", {
             userId: user._id,
             email: user.email,
+            profileImage: user.profileImage,
             updatedBy: req.user?.userId
         });
 
@@ -2924,7 +2924,7 @@ exports.updateAssignUser = async (req, res) => {
         });
 
     } catch (error) {
-        logError('Error updating user', error, {
+        logError("Error updating user", error, {
             userId: req.params.id,
             updatedBy: req.user?.userId
         });
@@ -2934,6 +2934,7 @@ exports.updateAssignUser = async (req, res) => {
         });
     }
 };
+
 // ===================== DELETE USER =====================
 exports.deleteAssignUser = async (req, res) => {
     try {
@@ -4317,8 +4318,6 @@ exports.createBlog = async (req, res, next) => {
     try {
         const {
             title,
-            subtitle,
-            category,
             tags,
             content,
             isPublished
@@ -4362,25 +4361,6 @@ exports.createBlog = async (req, res, next) => {
             bannerImageUrl = req.body.bannerImage;
         }
 
-        let galleryImageUrls = [];
-        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
-            try {
-                const uploadPromises = req.files.galleryImages.map(file =>
-                    uploadToS3(file, 'blogs/gallery')
-                );
-                galleryImageUrls = await Promise.all(uploadPromises);
-            } catch (uploadError) {
-                logError('Error uploading gallery images', uploadError);
-            }
-        } else if (req.body.galleryImages) {
-            const galleryImagesData = typeof req.body.galleryImages === 'string'
-                ? JSON.parse(req.body.galleryImages)
-                : req.body.galleryImages;
-            if (Array.isArray(galleryImagesData)) {
-                galleryImageUrls = galleryImagesData;
-            }
-        }
-
         const slug = title
             .toLowerCase()
             .replace(/[^a-z0-9]+/g, '-')
@@ -4394,13 +4374,10 @@ exports.createBlog = async (req, res, next) => {
 
         const blog = await Blog.create({
             title,
-            subtitle: subtitle || '',
-            category: category || '',
             author,
             authorName,
             tags: tagsArray,
             bannerImage: bannerImageUrl,
-            galleryImages: galleryImageUrls,
             content,
             slug: finalSlug,
             isPublished: isPublished === 'true' || isPublished === true
@@ -4441,7 +4418,6 @@ exports.getAllBlogs = async (req, res, next) => {
             filter.$or = [
                 { title: { $regex: search, $options: 'i' } },
                 { authorName: { $regex: search, $options: 'i' } },
-                { category: { $regex: search, $options: 'i' } },
                 { tags: { $in: [new RegExp(search, 'i')] } }
             ];
         }
@@ -4458,8 +4434,6 @@ exports.getAllBlogs = async (req, res, next) => {
         const formattedBlogs = blogs.map(blog => ({
             _id: blog._id,
             title: blog.title,
-            subtitle: blog.subtitle || '',
-            category: blog.category || '',
             author: blog.authorName || blog.author?.name || 'Admin',
             authorId: blog.author?._id || blog.author,
             tags: blog.tags || [],
@@ -4535,8 +4509,6 @@ exports.updateBlog = async (req, res, next) => {
         const { id } = req.params;
         const {
             title,
-            subtitle,
-            category,
             tags,
             content,
             isPublished
@@ -4563,8 +4535,6 @@ exports.updateBlog = async (req, res, next) => {
             updates.slug = slugExists ? `${slug}-${Date.now()}` : slug;
         }
 
-        if (subtitle !== undefined) updates.subtitle = subtitle;
-        if (category !== undefined) updates.category = category;
         if (content !== undefined) updates.content = content;
         if (isPublished !== undefined) {
             updates.isPublished = isPublished === 'true' || isPublished === true;
@@ -4596,25 +4566,6 @@ exports.updateBlog = async (req, res, next) => {
             }
         } else if (req.body.bannerImage !== undefined) {
             updates.bannerImage = req.body.bannerImage || null;
-        }
-
-        if (req.files?.galleryImages && req.files.galleryImages.length > 0) {
-            try {
-                const uploadPromises = req.files.galleryImages.map(file =>
-                    uploadToS3(file, 'blogs/gallery')
-                );
-                const newGalleryImages = await Promise.all(uploadPromises);
-                updates.galleryImages = [...(existingBlog.galleryImages || []), ...newGalleryImages];
-            } catch (uploadError) {
-                logError('Error uploading gallery images', uploadError);
-            }
-        } else if (req.body.galleryImages !== undefined) {
-            const galleryImagesData = typeof req.body.galleryImages === 'string'
-                ? JSON.parse(req.body.galleryImages)
-                : req.body.galleryImages;
-            if (Array.isArray(galleryImagesData)) {
-                updates.galleryImages = galleryImagesData;
-            }
         }
 
         const updatedBlog = await Blog.findByIdAndUpdate(
