@@ -15,7 +15,7 @@ router.get('/locations', homePageController.getLocations);
 router.get('/search-properties', optionalAuthenticate, homePageController.searchProperties);
 
 // routes/homePageRoutes.js
-router.get('/getPropertyById/:id', authenticate, homePageController.getPropertyById);
+router.get('/getPropertyById/:id', optionalAuthenticate, homePageController.getPropertyById);
 
 // My Properties Tabs
 router.post('/property/view', authenticate, homePageController.addViewedProperty);
