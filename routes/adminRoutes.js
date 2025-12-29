@@ -59,7 +59,13 @@ router.get('/get_all_property', adminController.getAllProperties);
 
 router.get('/get_all_property_by_id/:id', adminController.getPropertyById);
 
-router.put('/update_property/:id', authenticate, upload.any(), authorizeAdmin, adminController.updateProperty);
+const uploadMiddleware = (req, res, next) => {
+  if (req.method === "OPTIONS") return next();
+  upload.any()(req, res, next);
+};
+
+
+router.put('/update_property/:id', authenticate, authorizeAdmin, uploadMiddleware, adminController.updateProperty);
 
 router.delete('/delete_property/:id', authenticate, authorizeAdmin, adminController.deleteProperty);
 
@@ -103,7 +109,7 @@ router.delete('/delete_role/:id', authenticate, authorizeSuperAdmin, adminContro
 router.post('/create_user', authenticate, authorizeSuperAdmin, adminController.createUser);
 router.get('/', authenticate, authorizeAdmin, adminController.getAllAssignUsers);
 router.get('/get_user/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
-router.put('/update_user/:id', authenticate, authorizeSuperAdmin, adminController.updateAssignUser);
+router.put('/update_user/:id', authenticate, authorizeSuperAdmin,upload.single('profileImage'), adminController.updateAssignUser);
 router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminController.deleteAssignUser);
 
 // BLOG MANAGEMENT ROUTES (with permission checks)
