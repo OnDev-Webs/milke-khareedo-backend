@@ -26,6 +26,44 @@ const getJoinedGroupPropertyIds = async (userId) => {
     }
 };
 
+// Helper function to get booked visit property IDs for a user (properties where user has booked a visit)
+const getBookedVisitPropertyIds = async (userId) => {
+    if (!userId) return new Set();
+    try {
+        // Find leads for the user
+        const userLeads = await leadModal.find({
+            userId: userId,
+            isStatus: true,
+            propertyId: { $exists: true, $ne: null }
+        }).select('_id propertyId').lean();
+
+        const leadIds = userLeads.map(lead => lead._id);
+
+        if (leadIds.length === 0) return new Set();
+
+        // Find LeadActivity records with activityType 'visit' for these leads
+        const visitActivities = await LeadActivity.find({
+            leadId: { $in: leadIds },
+            activityType: 'visit'
+        }).select('leadId').lean();
+
+        // Create a map of leadId to propertyId
+        const leadToPropertyMap = new Map(
+            userLeads.map(lead => [lead._id.toString(), lead.propertyId?.toString()])
+        );
+
+        // Get unique propertyIds from visit activities
+        const propertyIds = visitActivities
+            .map(activity => leadToPropertyMap.get(activity.leadId.toString()))
+            .filter(Boolean);
+
+        return new Set(propertyIds);
+    } catch (error) {
+        logError('Error fetching booked visit properties', error, { userId });
+        return new Set();
+    }
+};
+
 // Helper function to format property images array (cover first, then by order)
 const formatPropertyImages = (images) => {
     if (!images || !Array.isArray(images) || images.length === 0) {
@@ -199,9 +237,13 @@ const formatPropertyData = async (property, userId = null) => {
 
     // Check if user has joined the group for this property
     let isJoinGroup = false;
+    let isBookVisit = false;
     if (userId && property._id) {
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
         isJoinGroup = joinedGroupPropertyIds.has(property._id.toString());
+
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
+        isBookVisit = bookedVisitPropertyIds.has(property._id.toString());
     }
 
     // Prepare response data
@@ -232,7 +274,9 @@ const formatPropertyData = async (property, userId = null) => {
             percentage: discountPercentageValue,
             percentageFormatted: `${discountPercentageValue.toFixed(2)}%`
         } : null,
-        isJoinGroup: isJoinGroup
+        isJoinGroup: isJoinGroup,
+        isBookVisit: isBookVisit,
+        minGroupMembers: property.minGroupMembers || 0
     };
 };
 
