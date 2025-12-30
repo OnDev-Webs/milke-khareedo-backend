@@ -54,6 +54,44 @@ const getJoinedGroupPropertyIds = async (userId) => {
     }
 };
 
+// Helper function to get booked visit property IDs for a user (properties where user has booked a visit)
+const getBookedVisitPropertyIds = async (userId) => {
+    if (!userId) return new Set();
+    try {
+        // Find leads for the user
+        const userLeads = await leadModal.find({
+            userId: userId,
+            isStatus: true,
+            propertyId: { $exists: true, $ne: null }
+        }).select('_id propertyId').lean();
+
+        const leadIds = userLeads.map(lead => lead._id);
+
+        if (leadIds.length === 0) return new Set();
+
+        // Find LeadActivity records with activityType 'visit' for these leads
+        const visitActivities = await LeadActivity.find({
+            leadId: { $in: leadIds },
+            activityType: 'visit'
+        }).select('leadId').lean();
+
+        // Create a map of leadId to propertyId
+        const leadToPropertyMap = new Map(
+            userLeads.map(lead => [lead._id.toString(), lead.propertyId?.toString()])
+        );
+
+        // Get unique propertyIds from visit activities
+        const propertyIds = visitActivities
+            .map(activity => leadToPropertyMap.get(activity.leadId.toString()))
+            .filter(Boolean);
+
+        return new Set(propertyIds);
+    } catch (error) {
+        logError('Error fetching booked visit properties', error, { userId });
+        return new Set();
+    }
+};
+
 // Helper function to format property images array (cover first, then by order)
 const formatPropertyImages = (images) => {
     if (!images || !Array.isArray(images) || images.length === 0) {
@@ -229,6 +267,8 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
         // Get joined group property IDs for the user
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
+        // Get booked visit property IDs for the user
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
 
         const developerIds = [...new Set(rawData.map(item => {
             const dev = item.developer;
@@ -339,6 +379,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
             const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
@@ -351,6 +392,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
+                isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
@@ -770,6 +812,7 @@ exports.searchProperties = async (req, res, next) => {
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
             const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
@@ -782,6 +825,7 @@ exports.searchProperties = async (req, res, next) => {
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
+                isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
@@ -1065,9 +1109,12 @@ exports.getPropertyById = async (req, res, next) => {
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
         // Check if user has joined the group for this property
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
+        // Check if user has booked a visit for this property
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
         const propertyId = property._id.toString();
         const isFavorite = favoritePropertyIds.has(propertyId);
         const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+        const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
         const propertyDetails = {
             id: property._id,
@@ -1078,6 +1125,7 @@ exports.getPropertyById = async (req, res, next) => {
             longitude: property.longitude || null,
             isFavorite: isFavorite,
             isJoinGroup: isJoinGroup,
+            isBookVisit: isBookVisit,
             isAuthenticated: isAuthenticated,
             locationDetails: {
                 full: property.location,
@@ -2347,6 +2395,7 @@ exports.compareProperties = async (req, res, next) => {
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
             const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
             const parsePrice = (price) => {
                 if (!price) return 0;
@@ -2481,6 +2530,7 @@ exports.compareProperties = async (req, res, next) => {
                 pinLabel: pinLabel, // A, B, C, D, etc. - Always included for all properties
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
+                isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 propertyType: 'Residential',
                 developerPrice: property.developerPrice || null,
@@ -2874,6 +2924,7 @@ exports.getAllProperties = async (req, res, next) => {
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
+                isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 priceRange: {
                     min: minPrice,
