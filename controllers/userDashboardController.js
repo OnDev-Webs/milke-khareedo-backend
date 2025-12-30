@@ -767,14 +767,38 @@ exports.getViewedProperties = async (req, res) => {
             activityType: "viewed"
         });
 
-        const data = await UserPropertyActivity.find({
+        const activities = await UserPropertyActivity.find({
             userId,
             activityType: "viewed"
         })
-            .populate("propertyId")
+            .populate({
+                path: "propertyId",
+                populate: [
+                    { path: 'developer', select: 'developerName' },
+                    { path: 'relationshipManager', select: 'name email phone phoneNumber countryCode' }
+                ],
+                select: 'projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate'
+            })
+            .select('propertyId lastViewedAt')
             .sort({ lastViewedAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limit)
+            .lean();
+
+        // Format each property using formatPropertyData helper
+        const formattedProperties = await Promise.all(
+            activities.map(async (activity) => {
+                if (!activity.propertyId) return null;
+                const formattedProperty = await formatPropertyData(activity.propertyId);
+                return {
+                    ...formattedProperty,
+                    lastViewedAt: activity.lastViewedAt
+                };
+            })
+        );
+
+        // Filter out any null values
+        const data = formattedProperties.filter(Boolean);
 
         logInfo('Viewed properties fetched', { userId, total, page, limit });
         res.json({
@@ -790,7 +814,7 @@ exports.getViewedProperties = async (req, res) => {
         });
 
     } catch (error) {
-        logError('Error fetching viewed properties', error, { userId });
+        logError('Error fetching viewed properties', error, { userId: req.user?.userId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -808,16 +832,38 @@ exports.getFavoritedProperties = async (req, res) => {
             activityType: "favorite"
         });
 
-        const data = await UserPropertyActivity.find({
+        const activities = await UserPropertyActivity.find({
             userId,
             activityType: "favorite"
         })
-            .populate("propertyId", 'projectName location developer')
+            .populate({
+                path: "propertyId",
+                populate: [
+                    { path: 'developer', select: 'developerName' },
+                    { path: 'relationshipManager', select: 'name email phone phoneNumber countryCode' }
+                ],
+                select: 'projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate'
+            })
             .select('propertyId favoritedAt')
             .sort({ favoritedAt: -1 })
             .skip(skip)
             .limit(limit)
             .lean();
+
+        // Format each property using formatPropertyData helper
+        const formattedProperties = await Promise.all(
+            activities.map(async (activity) => {
+                if (!activity.propertyId) return null;
+                const formattedProperty = await formatPropertyData(activity.propertyId);
+                return {
+                    ...formattedProperty,
+                    favoritedAt: activity.favoritedAt
+                };
+            })
+        );
+
+        // Filter out any null values
+        const data = formattedProperties.filter(Boolean);
 
         logInfo('Favorited properties fetched', { userId, total, page, limit });
         res.json({
@@ -833,7 +879,7 @@ exports.getFavoritedProperties = async (req, res) => {
         });
 
     } catch (error) {
-        logError('Error fetching favorited properties', error, { userId });
+        logError('Error fetching favorited properties', error, { userId: req.user?.userId });
         res.json({ success: false, message: error.message });
     }
 };

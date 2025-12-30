@@ -127,145 +127,6 @@ const getClientIpAddress = (req) => {
     return null;
 };
 
-// Helper function to format property data with all required fields
-const formatPropertyData = async (property) => {
-    // Format property data similar to getTopVisitedProperties
-    let developerInfo = null;
-    if (property.developer?._id || property.developer?.developerName) {
-        developerInfo = { developerName: property.developer.developerName || 'N/A' };
-    } else {
-        const developerId = property.developer?.toString() || property.developer;
-        if (developerId) {
-            developerInfo = await Developer.findById(developerId).select('developerName').lean();
-        }
-    }
-
-    // Helper to parse price (handles both number and string)
-    const parsePrice = (price) => {
-        if (!price) return 0;
-        if (typeof price === 'number') return price;
-        let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-        const priceStrLower = price.toString().toLowerCase();
-        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-            priceNum = priceNum * 100000;
-        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-            priceNum = priceNum * 10000000;
-        }
-        return priceNum;
-    };
-
-    const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
-    const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
-
-    const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
-    const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
-
-    // Format images array (cover first, then by order)
-    const images = formatPropertyImages(property.images);
-
-    // Format lastDayToJoin from possessionDate
-    let lastDayToJoin = null;
-    if (property.possessionDate) {
-        const date = new Date(property.possessionDate);
-        lastDayToJoin = date.toLocaleDateString('en-IN', {
-            day: 'numeric',
-            month: 'short',
-            year: 'numeric'
-        });
-    }
-
-    // Calculate opening left (available units)
-    const openingLeft = (() => {
-        let count = 0;
-        if (property.configurations && Array.isArray(property.configurations)) {
-            property.configurations.forEach(config => {
-                if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
-                    count += config.subConfigurations.filter(sc => sc.availabilityStatus === 'Available' || sc.availabilityStatus === 'Ready').length;
-                } else if (config.availabilityStatus === 'Available' || config.availabilityStatus === 'Ready') {
-                    count += 1;
-                }
-            });
-        }
-        return count;
-    })();
-
-    // Parse prices for discount calculation
-    const parsePriceForDiscount = (price) => {
-        if (!price) return 0;
-        if (typeof price === 'number') return price;
-        let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-        const priceStrLower = price.toString().toLowerCase();
-        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-            priceNum = priceNum * 100000;
-        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-            priceNum = priceNum * 10000000;
-        }
-        return priceNum;
-    };
-
-    const devPriceNum = parsePriceForDiscount(property.developerPrice);
-    const offerPriceNum = parsePriceForDiscount(property.offerPrice);
-
-    // Calculate discount
-    let discountAmount = 0;
-    let discountPercentageValue = 0;
-    if (property.discountPercentage) {
-        discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
-        if (devPriceNum > 0 && discountPercentageValue > 0) {
-            discountAmount = (devPriceNum * discountPercentageValue) / 100;
-        }
-    } else if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
-        discountAmount = devPriceNum - offerPriceNum;
-        discountPercentageValue = parseFloat(((discountAmount / devPriceNum) * 100).toFixed(2));
-    }
-
-    const formatPrice = (amount) => {
-        if (!amount || amount === 0) return '₹ 0';
-        if (amount >= 10000000) {
-            return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
-        } else if (amount >= 100000) {
-            return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
-        } else {
-            return `₹ ${amount.toLocaleString('en-IN')}`;
-        }
-    };
-
-    // Format relationship manager phone
-    const rmPhone = property.relationshipManager?.phone || property.relationshipManager?.phoneNumber || null;
-    const rmCountryCode = property.relationshipManager?.countryCode || '+91';
-    const formattedRmPhone = rmPhone ? `${rmCountryCode} ${rmPhone}` : null;
-
-    // Prepare response data
-    return {
-        id: property._id,
-        projectId: property.projectId,
-        projectName: property.projectName,
-        location: property.location,
-        latitude: property.latitude || null,
-        longitude: property.longitude || null,
-        images: images,
-        lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
-        openingLeft: openingLeft,
-        developer: developerInfo?.developerName || 'N/A',
-        developerPrice: {
-            value: devPriceNum,
-            formatted: formatPrice(devPriceNum)
-        },
-        offerPrice: offerPriceNum > 0 ? {
-            value: offerPriceNum,
-            formatted: formatPrice(offerPriceNum)
-        } : null,
-        price: devPriceNum > 0 ? formatPrice(devPriceNum) : (offerPriceNum > 0 ? formatPrice(offerPriceNum) : null),
-        relationshipManagerPhone: formattedRmPhone,
-        discount: discountAmount > 0 && discountPercentageValue > 0 ? {
-            amount: discountAmount,
-            amountFormatted: formatPrice(discountAmount),
-            percentage: discountPercentageValue,
-            percentageFormatted: `${discountPercentageValue.toFixed(2)}%`
-        } : null
-    };
-};
-
 // @desc    Get top properties based on lead count with location filtering
 // @route   GET /api/home/getTopProperty
 // @access  Public
@@ -1036,30 +897,39 @@ exports.searchProperties = async (req, res, next) => {
 // @access  Public
 exports.getLocations = async (req, res, next) => {
     try {
-        const locations = await Property.aggregate([
+        // Get locations sorted by lead count (top 7 only)
+        const locations = await leadModal.aggregate([
             { $match: { isStatus: true } },
-
             {
-                $group: {
-                    _id: "$location",
-                    propertyCount: { $sum: 1 }
+                $lookup: {
+                    from: "properties",
+                    localField: "propertyId",
+                    foreignField: "_id",
+                    as: "property"
                 }
             },
-
-            { $sort: { propertyCount: -1 } },
-
+            { $unwind: { path: "$property", preserveNullAndEmptyArrays: false } },
+            { $match: { "property.isStatus": true, "property.location": { $ne: null, $ne: "" } } },
+            {
+                $group: {
+                    _id: "$property.location",
+                    leadCount: { $sum: 1 }
+                }
+            },
+            { $sort: { leadCount: -1 } },
+            { $limit: 7 },
             {
                 $project: {
                     _id: 0,
                     location: "$_id",
-                    propertyCount: 1
+                    propertyCount: "$leadCount"
                 }
             }
         ]);
 
         const uniqueLocations = locations.map(item => item.location).filter(Boolean);
 
-        logInfo('Locations list fetched', {
+        logInfo('Top 7 locations fetched by lead count', {
             totalLocations: uniqueLocations.length
         });
 
@@ -1662,22 +1532,6 @@ exports.addViewedProperty = async (req, res) => {
         const userId = req.user.userId;
         const { propertyId } = req.body;
 
-        if (!propertyId) {
-            return res.status(400).json({ success: false, message: "Property ID is required" });
-        }
-
-        // Check if property exists
-        const property = await Property.findById(propertyId)
-            .populate('developer', 'developerName')
-            .populate('relationshipManager', 'name email phone phoneNumber countryCode')
-            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate')
-            .lean();
-
-        if (!property) {
-            return res.status(404).json({ success: false, message: "Property not found" });
-        }
-
-        // Update or create view activity
         const existing = await UserPropertyActivity.findOne({
             userId,
             propertyId,
@@ -1698,19 +1552,12 @@ exports.addViewedProperty = async (req, res) => {
             });
         }
 
-        // Format property data using helper function
-        const propertyData = await formatPropertyData(property);
-
         logInfo('Property view added', { userId, propertyId });
-        res.json({
-            success: true,
-            message: "View added successfully",
-            data: propertyData
-        });
+        res.json({ success: true, message: "View added successfully" });
 
     } catch (error) {
-        logError('Error adding property view', error, { userId: req.user?.userId, propertyId: req.body?.propertyId });
-        res.status(500).json({ success: false, message: error.message });
+        logError('Error adding property view', error, { userId, propertyId });
+        res.json({ success: false, message: error.message });
     }
 };
 
@@ -1718,21 +1565,6 @@ exports.toggleFavoriteProperty = async (req, res) => {
     try {
         const { propertyId } = req.body;
         const userId = req.user.userId;
-
-        if (!propertyId) {
-            return res.status(400).json({ success: false, message: "Property ID is required" });
-        }
-
-        // Check if property exists and fetch with required fields
-        const property = await Property.findById(propertyId)
-            .populate('developer', 'developerName')
-            .populate('relationshipManager', 'name email phone phoneNumber countryCode')
-            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate')
-            .lean();
-
-        if (!property) {
-            return res.status(404).json({ success: false, message: "Property not found" });
-        }
 
         const existing = await UserPropertyActivity.findOne({
             userId,
@@ -1743,13 +1575,9 @@ exports.toggleFavoriteProperty = async (req, res) => {
         if (existing) {
             await UserPropertyActivity.deleteOne({ _id: existing._id });
             logInfo('Property removed from favorites', { userId, propertyId });
-
-            // Format and return property data
-            const propertyData = await formatPropertyData(property);
             return res.json({
                 success: true,
-                message: "Removed from favorites",
-                data: propertyData
+                message: "Removed from favorites"
             });
         }
 
@@ -1761,18 +1589,11 @@ exports.toggleFavoriteProperty = async (req, res) => {
         });
 
         logInfo('Property added to favorites', { userId, propertyId });
-
-        // Format and return property data
-        const propertyData = await formatPropertyData(property);
-        res.json({
-            success: true,
-            message: "Added to favorites",
-            data: propertyData
-        });
+        res.json({ success: true, message: "Added to favorites" });
 
     } catch (error) {
-        logError('Error toggling favorite property', error, { userId: req.user?.userId, propertyId: req.body?.propertyId });
-        res.status(500).json({ success: false, message: error.message });
+        logError('Error toggling favorite property', error, { userId, propertyId });
+        res.json({ success: false, message: error.message });
     }
 };
 
@@ -1884,7 +1705,7 @@ exports.joinGroup = async (req, res) => {
                 propertyId,
                 relationshipManagerId: property.relationshipManager?._id,
                 rmEmail: property.relationshipManager?.email || "",
-                rmPhone: property.relationshipManager?.phone || property.relationshipManager?.phoneNumber || "",
+                rmPhone: property.relationshipManager?.phone || "",
                 isStatus: true,
                 source: source || "origin",
                 updatedBy: userId,
@@ -1941,17 +1762,10 @@ exports.registerVisit = async (req, res) => {
         const userId = req.user.userId;
         const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
 
-        if (!propertyId) {
-            return res.status(400).json({ success: false, message: "Property ID is required" });
-        }
-
-        // Check if property exists and fetch with required fields
         const property = await Property.findById(propertyId)
-            .populate('developer', 'developerName')
-            .populate('relationshipManager', 'name email phone phoneNumber countryCode')
-            .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate')
+            .populate('relationshipManager', 'name email phone')
+            .select('relationshipManager projectName')
             .lean();
-
         if (!property) {
             logInfo('Property not found for visit registration', { propertyId });
             return res.status(404).json({ success: false, message: "Property not found" });
@@ -2020,7 +1834,7 @@ exports.registerVisit = async (req, res) => {
                 propertyId,
                 relationshipManagerId: property.relationshipManager?._id,
                 rmEmail: property.relationshipManager?.email || "",
-                rmPhone: property.relationshipManager?.phone || property.relationshipManager?.phoneNumber || "",
+                rmPhone: property.relationshipManager?.phone || "",
                 isStatus: true,
                 source: source || "origin",
                 updatedBy: userId,
@@ -2066,14 +1880,12 @@ exports.registerVisit = async (req, res) => {
         );
 
         logInfo('Visit registered and lead created/updated', { userId, propertyId, source, leadId: lead._id });
-
-        // Format and return property data
-        const propertyData = await formatPropertyData(property);
-
         res.json({
             success: true,
             message: "Visit registered & lead created/updated successfully",
-            data: propertyData
+            data: {
+                leadId: lead._id
+            }
         });
 
     } catch (error) {
@@ -2266,6 +2078,7 @@ exports.getAllBlogs = async (req, res, next) => {
         const {
             page = 1,
             limit = 10,
+            category,
             tag,
             search,
             sortBy = 'newest' // newest, oldest, views
@@ -2278,6 +2091,10 @@ exports.getAllBlogs = async (req, res, next) => {
             isPublished: true
         };
 
+        if (category) {
+            filter.category = { $regex: category, $options: 'i' };
+        }
+
         if (tag) {
             filter.tags = { $in: [new RegExp(tag, 'i')] };
         }
@@ -2285,7 +2102,9 @@ exports.getAllBlogs = async (req, res, next) => {
         if (search) {
             filter.$or = [
                 { title: { $regex: search, $options: 'i' } },
+                { subtitle: { $regex: search, $options: 'i' } },
                 { content: { $regex: search, $options: 'i' } },
+                { category: { $regex: search, $options: 'i' } },
                 { tags: { $in: [new RegExp(search, 'i')] } }
             ];
         }
@@ -2305,7 +2124,7 @@ exports.getAllBlogs = async (req, res, next) => {
 
         const blogs = await Blog.find(filter)
             .populate('author', 'name profileImage')
-            .select('title author authorName tags bannerImage slug views createdAt')
+            .select('title subtitle category author authorName tags bannerImage slug views createdAt')
             .sort(sortCriteria)
             .skip(skip)
             .limit(parseInt(limit))
@@ -2322,6 +2141,8 @@ exports.getAllBlogs = async (req, res, next) => {
             return {
                 _id: blog._id,
                 title: blog.title,
+                subtitle: blog.subtitle || '',
+                category: blog.category || '',
                 author: blog.authorName || blog.author?.name || 'Admin',
                 authorImage: blog.author?.profileImage || null,
                 tags: blog.tags || [],
@@ -2333,7 +2154,7 @@ exports.getAllBlogs = async (req, res, next) => {
             };
         });
 
-        logInfo('Blogs fetched for homepage', { total, page, limit, tag });
+        logInfo('Blogs fetched for homepage', { total, page, limit, category, tag });
 
         res.json({
             success: true,
@@ -2396,6 +2217,8 @@ exports.getBlogById = async (req, res, next) => {
         const formattedBlog = {
             _id: blog._id,
             title: blog.title,
+            subtitle: blog.subtitle || '',
+            category: blog.category || '',
             author: {
                 id: blog.author?._id || blog.author,
                 name: blog.authorName || blog.author?.name || 'Admin',
@@ -2404,6 +2227,7 @@ exports.getBlogById = async (req, res, next) => {
             },
             tags: blog.tags || [],
             bannerImage: blog.bannerImage || null,
+            galleryImages: blog.galleryImages || [],
             content: blog.content,
             slug: blog.slug,
             date: formattedDate,
