@@ -10,6 +10,22 @@ const Developer = require('../models/developer');
 const { uploadToS3 } = require('../utils/s3');
 const { logInfo, logError } = require('../utils/logger');
 
+// Helper function to get joined group property IDs for a user (properties where user has a lead)
+const getJoinedGroupPropertyIds = async (userId) => {
+    if (!userId) return new Set();
+    try {
+        const leads = await leadModal.find({
+            userId: userId,
+            isStatus: true,
+            propertyId: { $exists: true, $ne: null }
+        }).select('propertyId').lean();
+        return new Set(leads.map(lead => lead.propertyId?.toString()).filter(Boolean));
+    } catch (error) {
+        logError('Error fetching joined group properties', error, { userId });
+        return new Set();
+    }
+};
+
 // Helper function to format property images array (cover first, then by order)
 const formatPropertyImages = (images) => {
     if (!images || !Array.isArray(images) || images.length === 0) {
@@ -74,7 +90,7 @@ const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
 };
 
 // Helper function to format property data with all required fields
-const formatPropertyData = async (property) => {
+const formatPropertyData = async (property, userId = null) => {
     // Format property data similar to getTopVisitedProperties
     let developerInfo = null;
     if (property.developer?._id || property.developer?.developerName) {
@@ -181,6 +197,13 @@ const formatPropertyData = async (property) => {
     const rmCountryCode = property.relationshipManager?.countryCode || '+91';
     const formattedRmPhone = rmPhone ? `${rmCountryCode} ${rmPhone}` : null;
 
+    // Check if user has joined the group for this property
+    let isJoinGroup = false;
+    if (userId && property._id) {
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
+        isJoinGroup = joinedGroupPropertyIds.has(property._id.toString());
+    }
+
     // Prepare response data
     return {
         id: property._id,
@@ -208,7 +231,8 @@ const formatPropertyData = async (property) => {
             amountFormatted: formatPrice(discountAmount),
             percentage: discountPercentageValue,
             percentageFormatted: `${discountPercentageValue.toFixed(2)}%`
-        } : null
+        } : null,
+        isJoinGroup: isJoinGroup
     };
 };
 
@@ -301,7 +325,7 @@ exports.addViewedProperty = async (req, res) => {
         }
 
         // Format property data using helper function
-        const propertyData = await formatPropertyData(property);
+        const propertyData = await formatPropertyData(property, userId);
 
         logInfo('Property view added in dashboard', { userId, propertyId });
         res.json({
@@ -347,7 +371,7 @@ exports.toggleFavoriteProperty = async (req, res) => {
             logInfo('Property removed from favorites in dashboard', { userId, propertyId });
 
             // Format and return property data
-            const propertyData = await formatPropertyData(property);
+            const propertyData = await formatPropertyData(property, userId);
             return res.json({
                 success: true,
                 message: "Removed from favorites",
@@ -365,7 +389,7 @@ exports.toggleFavoriteProperty = async (req, res) => {
         logInfo('Property added to favorites in dashboard', { userId, propertyId });
 
         // Format and return property data
-        const propertyData = await formatPropertyData(property);
+        const propertyData = await formatPropertyData(property, userId);
         res.json({
             success: true,
             message: "Added to favorites",
@@ -477,7 +501,7 @@ exports.registerVisit = async (req, res) => {
         });
 
         // Format and return property data
-        const propertyData = await formatPropertyData(property);
+        const propertyData = await formatPropertyData(property, userId);
 
         res.json({
             success: true,
@@ -767,14 +791,38 @@ exports.getViewedProperties = async (req, res) => {
             activityType: "viewed"
         });
 
-        const data = await UserPropertyActivity.find({
+        const activities = await UserPropertyActivity.find({
             userId,
             activityType: "viewed"
         })
-            .populate("propertyId")
+            .populate({
+                path: "propertyId",
+                populate: [
+                    { path: 'developer', select: 'developerName' },
+                    { path: 'relationshipManager', select: 'name email phone phoneNumber countryCode' }
+                ],
+                select: 'projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate'
+            })
+            .select('propertyId lastViewedAt')
             .sort({ lastViewedAt: -1 })
             .skip(skip)
-            .limit(limit);
+            .limit(limit)
+            .lean();
+
+        // Format each property using formatPropertyData helper
+        const formattedProperties = await Promise.all(
+            activities.map(async (activity) => {
+                if (!activity.propertyId) return null;
+                const formattedProperty = await formatPropertyData(activity.propertyId, userId);
+                return {
+                    ...formattedProperty,
+                    lastViewedAt: activity.lastViewedAt
+                };
+            })
+        );
+
+        // Filter out any null values
+        const data = formattedProperties.filter(Boolean);
 
         logInfo('Viewed properties fetched', { userId, total, page, limit });
         res.json({
@@ -790,7 +838,7 @@ exports.getViewedProperties = async (req, res) => {
         });
 
     } catch (error) {
-        logError('Error fetching viewed properties', error, { userId });
+        logError('Error fetching viewed properties', error, { userId: req.user?.userId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -808,16 +856,38 @@ exports.getFavoritedProperties = async (req, res) => {
             activityType: "favorite"
         });
 
-        const data = await UserPropertyActivity.find({
+        const activities = await UserPropertyActivity.find({
             userId,
             activityType: "favorite"
         })
-            .populate("propertyId", 'projectName location developer')
+            .populate({
+                path: "propertyId",
+                populate: [
+                    { path: 'developer', select: 'developerName' },
+                    { path: 'relationshipManager', select: 'name email phone phoneNumber countryCode' }
+                ],
+                select: 'projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate'
+            })
             .select('propertyId favoritedAt')
             .sort({ favoritedAt: -1 })
             .skip(skip)
             .limit(limit)
             .lean();
+
+        // Format each property using formatPropertyData helper
+        const formattedProperties = await Promise.all(
+            activities.map(async (activity) => {
+                if (!activity.propertyId) return null;
+                const formattedProperty = await formatPropertyData(activity.propertyId, userId);
+                return {
+                    ...formattedProperty,
+                    favoritedAt: activity.favoritedAt
+                };
+            })
+        );
+
+        // Filter out any null values
+        const data = formattedProperties.filter(Boolean);
 
         logInfo('Favorited properties fetched', { userId, total, page, limit });
         res.json({
@@ -833,7 +903,7 @@ exports.getFavoritedProperties = async (req, res) => {
         });
 
     } catch (error) {
-        logError('Error fetching favorited properties', error, { userId });
+        logError('Error fetching favorited properties', error, { userId: req.user?.userId });
         res.json({ success: false, message: error.message });
     }
 };
@@ -1052,11 +1122,15 @@ exports.getVisitedProperties = async (req, res) => {
         const upcomingWithProperties = await Promise.all(
             upcomingPaginated.map(async (lead) => {
                 const property = await Property.findById(lead.propertyId)
-                    .populate('developer', 'developerName logo')
-                    .select('projectName location developer images offerPrice developerPrice discountPercentage')
+                    .populate('developer', 'developerName')
+                    .populate('relationshipManager', 'name email phone phoneNumber countryCode')
+                    .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate')
                     .lean();
 
                 const visitActivity = lead.visitActivity[0];
+
+                // Format property data using formatPropertyData helper
+                const formattedProperty = property ? await formatPropertyData(property, userId) : null;
 
                 return {
                     lead: {
@@ -1080,16 +1154,7 @@ exports.getVisitedProperties = async (req, res) => {
                         activityDate: visitActivity.activityDate,
                         description: visitActivity.description
                     },
-                    property: property ? {
-                        _id: property._id,
-                        projectName: property.projectName,
-                        location: property.location,
-                        developer: property.developer,
-                        coverImage: property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null,
-                        offerPrice: property.offerPrice,
-                        developerPrice: property.developerPrice,
-                        discountPercentage: property.discountPercentage
-                    } : null
+                    property: formattedProperty
                 };
             })
         );
@@ -1097,11 +1162,15 @@ exports.getVisitedProperties = async (req, res) => {
         const completedWithProperties = await Promise.all(
             completedPaginated.map(async (lead) => {
                 const property = await Property.findById(lead.propertyId)
-                    .populate('developer', 'developerName logo')
-                    .select('projectName location developer images offerPrice developerPrice discountPercentage')
+                    .populate('developer', 'developerName')
+                    .populate('relationshipManager', 'name email phone phoneNumber countryCode')
+                    .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate')
                     .lean();
 
                 const visitActivity = lead.visitActivity[0];
+
+                // Format property data using formatPropertyData helper
+                const formattedProperty = property ? await formatPropertyData(property, userId) : null;
 
                 return {
                     lead: {
@@ -1125,16 +1194,7 @@ exports.getVisitedProperties = async (req, res) => {
                         activityDate: visitActivity.activityDate,
                         description: visitActivity.description
                     },
-                    property: property ? {
-                        _id: property._id,
-                        projectName: property.projectName,
-                        location: property.location,
-                        developer: property.developer,
-                        coverImage: property.images?.find(img => img.isCover)?.url || property.images?.[0]?.url || null,
-                        offerPrice: property.offerPrice,
-                        developerPrice: property.developerPrice,
-                        discountPercentage: property.discountPercentage
-                    } : null
+                    property: formattedProperty
                 };
             })
         );
