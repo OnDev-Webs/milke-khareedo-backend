@@ -38,6 +38,22 @@ const getFavoritePropertyIds = async (userId) => {
     }
 };
 
+// Helper function to get joined group property IDs for a user (properties where user has a lead)
+const getJoinedGroupPropertyIds = async (userId) => {
+    if (!userId) return new Set();
+    try {
+        const leads = await leadModal.find({
+            userId: userId,
+            isStatus: true,
+            propertyId: { $exists: true, $ne: null }
+        }).select('propertyId').lean();
+        return new Set(leads.map(lead => lead.propertyId?.toString()).filter(Boolean));
+    } catch (error) {
+        logError('Error fetching joined group properties', error, { userId });
+        return new Set();
+    }
+};
+
 // Helper function to format property images array (cover first, then by order)
 const formatPropertyImages = (images) => {
     if (!images || !Array.isArray(images) || images.length === 0) {
@@ -211,6 +227,8 @@ exports.getTopVisitedProperties = async (req, res, next) => {
 
         // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        // Get joined group property IDs for the user
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
         const developerIds = [...new Set(rawData.map(item => {
             const dev = item.developer;
@@ -320,6 +338,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
 
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
+            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
@@ -331,6 +350,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 images: images, // Array of images (cover first, then by order)
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
+                isJoinGroup: isJoinGroup,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
@@ -649,6 +669,8 @@ exports.searchProperties = async (req, res, next) => {
 
         // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        // Get joined group property IDs for the user
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
         const developerIds = [...new Set(paginatedProperties.map(item => {
             const dev = item.developer;
@@ -747,6 +769,7 @@ exports.searchProperties = async (req, res, next) => {
 
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
+            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
@@ -758,6 +781,7 @@ exports.searchProperties = async (req, res, next) => {
                 images: images, // Array of images (cover first, then by order)
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
+                isJoinGroup: isJoinGroup,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
@@ -1039,8 +1063,11 @@ exports.getPropertyById = async (req, res, next) => {
 
         // Check if property is favorited by the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        // Check if user has joined the group for this property
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
         const propertyId = property._id.toString();
         const isFavorite = favoritePropertyIds.has(propertyId);
+        const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
 
         const propertyDetails = {
             id: property._id,
@@ -1050,6 +1077,7 @@ exports.getPropertyById = async (req, res, next) => {
             latitude: property.latitude || null,
             longitude: property.longitude || null,
             isFavorite: isFavorite,
+            isJoinGroup: isJoinGroup,
             isAuthenticated: isAuthenticated,
             locationDetails: {
                 full: property.location,
@@ -2124,7 +2152,7 @@ exports.getAllBlogs = async (req, res, next) => {
 
         const blogs = await Blog.find(filter)
             .populate('author', 'name profileImage')
-            .select('title subtitle category author authorName tags bannerImage slug views createdAt')
+            .select('title subtitle category author authorName tags bannerImage slug views createdAt content')
             .sort(sortCriteria)
             .skip(skip)
             .limit(parseInt(limit))
@@ -2141,13 +2169,12 @@ exports.getAllBlogs = async (req, res, next) => {
             return {
                 _id: blog._id,
                 title: blog.title,
-                subtitle: blog.subtitle || '',
-                category: blog.category || '',
                 author: blog.authorName || blog.author?.name || 'Admin',
                 authorImage: blog.author?.profileImage || null,
                 tags: blog.tags || [],
                 bannerImage: blog.bannerImage || null,
                 slug: blog.slug,
+                content: blog.content || '',
                 date: formattedDate,
                 views: blog.views || 0,
                 createdAt: blog.createdAt
@@ -2164,7 +2191,8 @@ exports.getAllBlogs = async (req, res, next) => {
                 total,
                 page: parseInt(page),
                 limit: parseInt(limit),
-                totalPages: Math.ceil(total / parseInt(limit))
+                totalPages: Math.ceil(total / parseInt(limit)),
+                hasMore: (parseInt(page) * parseInt(limit)) < total
             }
         });
 
@@ -2303,6 +2331,8 @@ exports.compareProperties = async (req, res, next) => {
 
         // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        // Get joined group property IDs for the user
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
         // Sort properties to match the order of propertyIds in the request
         // This ensures pin labels (A, B, C) match the order properties were selected
@@ -2316,6 +2346,7 @@ exports.compareProperties = async (req, res, next) => {
 
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
+            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
 
             const parsePrice = (price) => {
                 if (!price) return 0;
@@ -2449,6 +2480,7 @@ exports.compareProperties = async (req, res, next) => {
                 hasMapCoordinates: hasMapCoordinates, // Flag to indicate if property can be shown on map
                 pinLabel: pinLabel, // A, B, C, D, etc. - Always included for all properties
                 isFavorite: isFavorite,
+                isJoinGroup: isJoinGroup,
                 isAuthenticated: isAuthenticated,
                 propertyType: 'Residential',
                 developerPrice: property.developerPrice || null,
@@ -2690,6 +2722,8 @@ exports.getAllProperties = async (req, res, next) => {
 
         // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
+        // Get joined group property IDs for the user
+        const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
         // Get all properties matching the filter
         let properties = await Property.find(filter)
@@ -2827,6 +2861,7 @@ exports.getAllProperties = async (req, res, next) => {
 
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
+            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
@@ -2838,6 +2873,7 @@ exports.getAllProperties = async (req, res, next) => {
                 images: images, // Array of images (cover first, then by order)
                 image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
                 isFavorite: isFavorite,
+                isJoinGroup: isJoinGroup,
                 isAuthenticated: isAuthenticated,
                 priceRange: {
                     min: minPrice,
