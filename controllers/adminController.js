@@ -1513,6 +1513,7 @@ exports.getLeadsList = async (req, res) => {
                 projectId: property.projectId || 'N/A',
                 status: item.status || 'lead_received',
                 dateTime: formatDateTime(item.createdAt),
+                source : item.source,
                 createdAt: item.createdAt,
                 updatedAt: item.updatedAt
             };
@@ -2696,12 +2697,11 @@ exports.createUser = async (req, res) => {
     try {
         const { name, email, password, phone, role } = req.body;
 
-        if (!name || !email || !password || !phone || !role) {
-            return res.status(400).json({
-                success: false,
-                message: "All fields are required"
-            });
-        }
+        if (!name) return res.status(400).json({ success: false, message: "Name is required" });
+        if (!email) return res.status(400).json({ success: false, message: "Email is required" });
+        if (!password) return res.status(400).json({ success: false, message: "Password is required" });
+        if (!phone) return res.status(400).json({ success: false, message: "Phone is required" });
+        if (!role) return res.status(400).json({ success: false, message: "Role is required" });
 
         const nameParts = name.trim().split(' ');
         const firstName = nameParts[0];
