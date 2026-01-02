@@ -1513,7 +1513,7 @@ exports.getLeadsList = async (req, res) => {
                 projectId: property.projectId || 'N/A',
                 status: item.status || 'lead_received',
                 dateTime: formatDateTime(item.createdAt),
-                source : item.source,
+                source: item.source,
                 createdAt: item.createdAt,
                 updatedAt: item.updatedAt
             };
@@ -2994,14 +2994,7 @@ exports.getAdminDashboard = async (req, res, next) => {
             const property = lead.propertyId || {};
             const user = lead.userId || {};
 
-            const priceStr = property.developerPrice || property.offerPrice || '0';
-            let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
-            const priceStrLower = priceStr.toLowerCase();
-            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                priceNum = priceNum * 100000;
-            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                priceNum = priceNum * 10000000;
-            }
+            const priceNum = property?.developerPrice ?? property?.offerPrice ?? 0;
 
             const formatPrice = (amount) => {
                 if (amount >= 10000000) {
@@ -3012,7 +3005,7 @@ exports.getAdminDashboard = async (req, res, next) => {
                     return `₹ ${amount.toLocaleString('en-IN')}`;
                 }
             };
-
+            
             return {
                 id: lead._id,
                 name: user.name || 'N/A',
