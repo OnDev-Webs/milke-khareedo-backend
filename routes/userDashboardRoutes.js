@@ -18,7 +18,8 @@ router.get('/get_search', authenticate, authorizeUser, userDashboardController.g
 router.post("/contact_preferences", authenticate, authorizeUser, userDashboardController.saveContactPreferences);  // Create/Update Preferences (Location, Budget, Floor)
 router.get("/get_contact_preferences", authenticate, authorizeUser, userDashboardController.getContactPreferences);
 
-// Update User Profile (All other user data)
+// User Profile
+router.get("/get_profile", authenticate, authorizeUser, userDashboardController.getProfile);
 router.put("/update_profile", authenticate, authorizeUser, upload.single('profileImage'), userDashboardController.updateProfile);
 
 router.get('/my-properties/viewed', authenticate, authorizeUser, userDashboardController.getViewedProperties);
