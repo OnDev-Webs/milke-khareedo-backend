@@ -953,6 +953,58 @@ exports.getFavoritedProperties = async (req, res) => {
 };
 
 // Update User Profile - For all user data updates (except preferences)
+// Get User Profile
+exports.getProfile = async (req, res) => {
+    try {
+        const userId = req.user.userId || req.user._id;
+
+        const user = await User.findById(userId)
+            .select('-password')
+            .populate('role', 'name permissions')
+            .lean();
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Profile fetched successfully",
+            data: {
+                user: {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    name: user.name,
+                    email: user.email,
+                    phoneNumber: user.phoneNumber,
+                    countryCode: user.countryCode,
+                    profileImage: user.profileImage || null,
+                    pincode: user.pincode || null,
+                    city: user.city || null,
+                    state: user.state || null,
+                    country: user.country || null,
+                    isPhoneVerified: user.isPhoneVerified || false,
+                    phoneVerifiedAt: user.phoneVerifiedAt || null,
+                    role: user.role || null,
+                    createdAt: user.createdAt,
+                    updatedAt: user.updatedAt
+                }
+            }
+        });
+
+    } catch (error) {
+        logError('Error fetching user profile', error, { userId: req.user?.userId || req.user?._id });
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+};
+
 exports.updateProfile = async (req, res) => {
     try {
         const userId = req.user.userId || req.user._id;
@@ -1045,12 +1097,14 @@ exports.updateProfile = async (req, res) => {
                     email: updatedUser.email,
                     phoneNumber: updatedUser.phoneNumber,
                     countryCode: updatedUser.countryCode,
-                    profileImage: updatedUser.profileImage,
-                    pincode: updatedUser.pincode,
-                    city: updatedUser.city,
-                    state: updatedUser.state,
-                    country: updatedUser.country,
-                    role: updatedUser.role,
+                    profileImage: updatedUser.profileImage || null,
+                    pincode: updatedUser.pincode || null,
+                    city: updatedUser.city || null,
+                    state: updatedUser.state || null,
+                    country: updatedUser.country || null,
+                    isPhoneVerified: updatedUser.isPhoneVerified || false,
+                    phoneVerifiedAt: updatedUser.phoneVerifiedAt || null,
+                    role: updatedUser.role || null,
                     createdAt: updatedUser.createdAt,
                     updatedAt: updatedUser.updatedAt
                 }
