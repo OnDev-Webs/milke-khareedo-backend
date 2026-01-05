@@ -2980,15 +2980,30 @@ exports.getAdminDashboard = async (req, res, next) => {
         const recentLeads = await leadModal.find({ isStatus: true })
             .populate({
                 path: 'userId',
-                select: 'name email phone profileImage'
+                select: 'name email phoneNumber profileImage'
             })
             .populate({
                 path: 'propertyId',
-                select: 'projectName developerPrice offerPrice discountPercentage images'
+                select: 'projectName projectId developerPrice offerPrice discountPercentage images'
             })
             .sort({ createdAt: -1 })
             .limit(10)
             .lean();
+
+
+        const formatLeadDate = (date) => {
+            if (!date) return 'N/A';
+
+            return new Date(date).toLocaleString('en-IN', {
+                day: 'numeric',
+                month: 'short',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+            });
+        };
+
 
         const formattedRecentLeads = recentLeads.map(lead => {
             const property = lead.propertyId || {};
@@ -3005,17 +3020,19 @@ exports.getAdminDashboard = async (req, res, next) => {
                     return `₹ ${amount.toLocaleString('en-IN')}`;
                 }
             };
-            
+
             return {
                 id: lead._id,
                 name: user.name || 'N/A',
                 email: user.email || 'N/A',
-                phone: user.phone || 'N/A',
+                phone: user.phoneNumber || 'N/A',
                 profileImage: user.profileImage || null,
                 projectName: property.projectName || 'N/A',
+                projectId: property.projectId,
                 amount: formatPrice(priceNum),
                 amountValue: priceNum,
-                createdAt: lead.createdAt
+                createdAt: lead.createdAt,
+                dateTime: formatLeadDate(lead.createdAt)
             };
         });
 
