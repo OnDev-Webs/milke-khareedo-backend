@@ -543,10 +543,36 @@ exports.toggleFavoriteProperty = async (req, res) => {
   }
 };
 
+// Helper function to get IP address from request
+const getClientIpAddress = (req) => {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  if (req.headers["x-real-ip"]) {
+    return req.headers["x-real-ip"];
+  }
+
+  if (req.ip) {
+    return req.ip;
+  }
+
+  if (req.connection && req.connection.remoteAddress) {
+    return req.connection.remoteAddress;
+  }
+
+  if (req.socket && req.socket.remoteAddress) {
+    return req.socket.remoteAddress;
+  }
+
+  return null;
+};
+
 exports.registerVisit = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
+    const { propertyId, visitDate, visitTime, source = "origin", ipAddress: ipAddressFromBody } = req.body;
 
     if (!propertyId) {
       return res
@@ -613,47 +639,48 @@ exports.registerVisit = async (req, res) => {
       });
     }
 
-    const getClientIpAddress = (req) => {
-      const forwarded = req.headers["x-forwarded-for"];
-      if (forwarded) {
-        return forwarded.split(",")[0].trim();
-      }
-
-      if (req.headers["x-real-ip"]) {
-        return req.headers["x-real-ip"];
-      }
-
-      if (req.ip) {
-        return req.ip;
-      }
-
-      if (req.connection && req.connection.remoteAddress) {
-        return req.connection.remoteAddress;
-      }
-
-      if (req.socket && req.socket.remoteAddress) {
-        return req.socket.remoteAddress;
-      }
-
-      return null;
-    };
-
-    const ipAddress = getClientIpAddress(req);
-
-    await leadModal.create({
+    // Check if lead already exists
+    let existingLead = await leadModal.findOne({
       userId,
       propertyId,
-      relationshipManagerId: property.relationshipManager?._id,
-      rmEmail: property.relationshipManager?.email || "",
-      rmPhone:
-        property.relationshipManager?.phone ||
-        property.relationshipManager?.phoneNumber ||
-        "",
       isStatus: true,
-      source: source || "origin",
-      updatedBy: userId,
-      ipAddress: ipAddress,
-    });
+    }).lean();
+
+    if (!existingLead) {
+      // Get IP address: prefer from request body, fallback to extracting from request headers
+      const ipAddress = ipAddressFromBody || getClientIpAddress(req);
+
+      await leadModal.create({
+        userId,
+        propertyId,
+        relationshipManagerId: property.relationshipManager?._id,
+        rmEmail: property.relationshipManager?.email || "",
+        rmPhone:
+          property.relationshipManager?.phone ||
+          property.relationshipManager?.phoneNumber ||
+          "",
+        isStatus: true,
+        source: source || "origin",
+        updatedBy: userId,
+        visitStatus: 'visited',
+        ipAddress: ipAddress, // Store IP address only on first lead creation
+      });
+      logInfo('New lead created for visit registration', {
+        userId,
+        propertyId,
+        ipAddress: ipAddress
+      });
+    } else {
+      // Update existing lead without modifying IP address
+      await leadModal.updateOne(
+        { _id: existingLead._id },
+        {
+          visitStatus: 'visited',
+          updatedBy: userId
+          // IP address should not be updated for existing leads
+        }
+      );
+    }
 
     // Format and return property data
     const propertyData = await formatPropertyData(property, userId);

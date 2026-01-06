@@ -38,7 +38,6 @@ const getFavoritePropertyIds = async (userId) => {
     }
 };
 
-// Helper function to get joined group property IDs for a user (properties where user has a lead)
 const getJoinedGroupPropertyIds = async (userId) => {
     if (!userId) return new Set();
     try {
@@ -54,11 +53,9 @@ const getJoinedGroupPropertyIds = async (userId) => {
     }
 };
 
-// Helper function to get booked visit property IDs for a user (properties where user has booked a visit)
 const getBookedVisitPropertyIds = async (userId) => {
     if (!userId) return new Set();
     try {
-        // Find leads for the user
         const userLeads = await leadModal.find({
             userId: userId,
             isStatus: true,
@@ -69,18 +66,15 @@ const getBookedVisitPropertyIds = async (userId) => {
 
         if (leadIds.length === 0) return new Set();
 
-        // Find LeadActivity records with activityType 'visit' for these leads
         const visitActivities = await LeadActivity.find({
             leadId: { $in: leadIds },
             activityType: 'visit'
         }).select('leadId').lean();
 
-        // Create a map of leadId to propertyId
         const leadToPropertyMap = new Map(
             userLeads.map(lead => [lead._id.toString(), lead.propertyId?.toString()])
         );
 
-        // Get unique propertyIds from visit activities
         const propertyIds = visitActivities
             .map(activity => leadToPropertyMap.get(activity.leadId.toString()))
             .filter(Boolean);
@@ -98,31 +92,24 @@ const formatPropertyImages = (images) => {
         return [];
     }
 
-    // Separate cover image and other images
     const coverImages = images.filter(img => img.isCover === true);
     const otherImages = images.filter(img => !img.isCover || img.isCover === false);
 
-    // Sort cover images (should only be one, but handle multiple)
     coverImages.sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    // Sort other images by order
     otherImages.sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    // Combine: cover first, then others
     const sortedImages = [...coverImages, ...otherImages];
 
-    // Return array of image URLs
     return sortedImages.map(img => {
-        // Handle both object format { url, isCover, order } and string format
         if (typeof img === 'string') {
             return img;
         }
         return img.url || img;
-    }).filter(Boolean); // Remove any null/undefined values
+    }).filter(Boolean);
 };
 
-// Helper function to extract prices from configurations (handles both old and new format)
-// Price is now stored as Number (in rupees), but we handle legacy string format too
+
 const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
     const prices = [];
     if (!configurations || !Array.isArray(configurations)) return prices;
@@ -259,15 +246,11 @@ exports.getTopVisitedProperties = async (req, res, next) => {
         const total = allProperties.length;
         const rawData = allProperties.slice(skip, skip + limit);
 
-        // Get user ID if authenticated
         const userId = req.user?.userId || null;
         const isAuthenticated = !!userId;
 
-        // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
-        // Get joined group property IDs for the user
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
-        // Get booked visit property IDs for the user
         const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
 
         const developerIds = [...new Set(rawData.map(item => {
@@ -281,16 +264,38 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             .lean();
         const developerMap = new Map(developers.map(dev => [dev._id.toString(), dev]));
 
+        // Get active leads count for each property in the current page
+        const propertyIds = rawData.map(item => item._id);
+        const activeLeadsCounts = await leadModal.aggregate([
+            {
+                $match: {
+                    propertyId: { $in: propertyIds },
+                    isStatus: true
+                }
+            },
+            {
+                $group: {
+                    _id: "$propertyId",
+                    activeLeadsCount: { $sum: 1 }
+                }
+            }
+        ]);
+
+        const activeLeadsMap = new Map(
+            activeLeadsCounts.map(item => [item._id.toString(), item.activeLeadsCount])
+        );
+
         const formattedProperties = rawData.map((item) => {
             const property = item;
             const leadCount = property.leadCount || 0;
+            const propertyIdStr = property._id.toString();
+            const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
 
             const developerId = property.developer?._id
                 ? property.developer._id.toString()
                 : (property.developer?.toString() || property.developer);
             const developerInfo = developerMap.get(developerId);
 
-            // Helper to parse price (handles both number and string)
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -319,7 +324,6 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             }
             const uniqueUnitTypes = [...new Set(unitTypes)];
 
-            // Format images array (cover first, then by order)
             const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
@@ -336,7 +340,6 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             let discountPercentageValue = 0;
             let offerPriceNum = 0;
 
-            // Helper to parse price (handles both number and string for legacy support)
             const parsePriceForDiscount = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -350,7 +353,6 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 return priceNum;
             };
 
-            // Get actual developerPrice and offerPrice from property
             const devPriceNum = parsePriceForDiscount(property.developerPrice);
             offerPriceNum = parsePriceForDiscount(property.offerPrice);
 
@@ -388,41 +390,15 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                images: images, // Array of images (cover first, then by order)
-                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                images: images,
+                image: images.length > 0 ? images[0] : null,
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
                 isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
-                groupSizeFormatted: `${String(property.minGroupMembers || 0).padStart(2, '0')} Members`,
-                openingLeft: (() => {
-                    let count = 0;
-                    if (property.configurations && Array.isArray(property.configurations)) {
-                        property.configurations.forEach(config => {
-                            if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
-                                count += config.subConfigurations.filter(sc => sc.availabilityStatus === 'Available' || sc.availabilityStatus === 'Ready').length;
-                            } else if (config.availabilityStatus === 'Available' || config.availabilityStatus === 'Ready') {
-                                count += 1;
-                            }
-                        });
-                    }
-                    return count;
-                })(),
-                openingFormatted: (() => {
-                    let count = 0;
-                    if (property.configurations && Array.isArray(property.configurations)) {
-                        property.configurations.forEach(config => {
-                            if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
-                                count += config.subConfigurations.filter(sc => sc.availabilityStatus === 'Available' || sc.availabilityStatus === 'Ready').length;
-                            } else if (config.availabilityStatus === 'Available' || config.availabilityStatus === 'Ready') {
-                                count += 1;
-                            }
-                        });
-                    }
-                    return `${String(count).padStart(2, '0')} Left`;
-                })(),
+                openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
                 targetPrice: {
                     value: minPrice,
                     formatted: formatPrice(minPrice)
@@ -539,11 +515,6 @@ exports.searchProperties = async (req, res, next) => {
             propertyFilter.$or = searchConditions;
         }
 
-        if (priceMin || priceMax) {
-            // We'll filter by price after getting properties with calculated prices
-            // Store price filters for later use
-        }
-
         if (bhk) {
             propertyFilter["configurations"] = { $elemMatch: { unitType: { $regex: bhk, $options: "i" } } };
         }
@@ -630,7 +601,6 @@ exports.searchProperties = async (req, res, next) => {
                 const minPrice = Math.min(...prices);
                 const maxPrice = Math.max(...prices);
 
-                // Property matches if any price falls within the range
                 return (minPrice >= minPriceFilter && minPrice <= maxPriceFilter) ||
                     (maxPrice >= minPriceFilter && maxPrice <= maxPriceFilter) ||
                     (minPrice <= minPriceFilter && maxPrice >= maxPriceFilter);
@@ -641,10 +611,9 @@ exports.searchProperties = async (req, res, next) => {
             allProperties.sort((a, b) => {
                 const dateA = a.createdAt ? new Date(a.createdAt) : new Date(0);
                 const dateB = b.createdAt ? new Date(b.createdAt) : new Date(0);
-                return dateB - dateA; // Newest first
+                return dateB - dateA;
             });
         } else if (sortBy === 'priceLow') {
-            // Helper to parse price (handles both number and string)
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -667,7 +636,6 @@ exports.searchProperties = async (req, res, next) => {
                 return priceA - priceB;
             });
         } else if (sortBy === 'priceHigh') {
-            // Helper to parse price (handles both number and string)
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -690,7 +658,6 @@ exports.searchProperties = async (req, res, next) => {
                 return priceB - priceA;
             });
         } else {
-            // Default: Sort by lead count (descending), then by last lead date
             allProperties.sort((a, b) => {
                 if (b.leadCount !== a.leadCount) {
                     return b.leadCount - a.leadCount;
@@ -705,14 +672,32 @@ exports.searchProperties = async (req, res, next) => {
         const total = allProperties.length;
         const paginatedProperties = allProperties.slice(skip, skip + limit);
 
-        // Get user ID if authenticated
         const userId = req.user?.userId || null;
         const isAuthenticated = !!userId;
 
-        // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
-        // Get joined group property IDs for the user
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
+
+        const propertyIds = paginatedProperties.map(item => item._id);
+        const activeLeadsCounts = await leadModal.aggregate([
+            {
+                $match: {
+                    propertyId: { $in: propertyIds },
+                    isStatus: true
+                }
+            },
+            {
+                $group: {
+                    _id: "$propertyId",
+                    activeLeadsCount: { $sum: 1 }
+                }
+            }
+        ]);
+
+        const activeLeadsMap = new Map(
+            activeLeadsCounts.map(item => [item._id.toString(), item.activeLeadsCount])
+        );
 
         const developerIds = [...new Set(paginatedProperties.map(item => {
             const dev = item.developer;
@@ -727,6 +712,8 @@ exports.searchProperties = async (req, res, next) => {
 
         const formattedProperties = paginatedProperties.map((property) => {
             const leadCount = property.leadCount || 0;
+            const propertyIdStr = property._id.toString();
+            const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
 
             const developerId = property.developer?._id
                 ? property.developer._id.toString()
@@ -753,7 +740,6 @@ exports.searchProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations?.map(config => config.unitType).filter(Boolean) || [])];
 
-            // Format images array (cover first, then by order)
             const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
@@ -821,17 +807,15 @@ exports.searchProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                images: images, // Array of images (cover first, then by order)
-                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                images: images,
+                image: images.length > 0 ? images[0] : null,
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
                 isBookVisit: isBookVisit,
                 isAuthenticated: isAuthenticated,
                 lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                 groupSize: property.minGroupMembers || 0,
-                groupSizeFormatted: `${String(property.minGroupMembers || 0).padStart(2, '0')} Members`,
-                openingLeft: property.configurations?.filter(c => c.availabilityStatus === 'Available').length || 0,
-                openingFormatted: `${String(property.configurations?.filter(c => c.availabilityStatus === 'Available').length || 0).padStart(2, '0')} Left`,
+                openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
                 targetPrice: {
                     value: minPrice,
                     formatted: formatPrice(minPrice)
@@ -861,7 +845,6 @@ exports.searchProperties = async (req, res, next) => {
             };
         });
 
-        // Note: userId already declared above for favorite check
         let searchHistoryData = null;
 
         if (userId && (searchText || city)) {
@@ -963,9 +946,46 @@ exports.searchProperties = async (req, res, next) => {
 // @desc    Get all unique locations with property counts (sorted by count)
 // @route   GET /api/home/locations
 // @access  Public
+// Helper function to extract locality from full address
+const extractLocality = (fullAddress) => {
+    if (!fullAddress || typeof fullAddress !== 'string') {
+        return null;
+    }
+
+    const parts = fullAddress.split(',').map(part => part.trim()).filter(Boolean);
+
+    if (parts.length === 0) {
+        return null;
+    }
+
+    if (parts.length === 1) {
+        return parts[0];
+    }
+
+    const propertyNameKeywords = ['residency', 'villa', 'tower', 'apartments', 'complex', 'society', 'park', 'heights', 'enclave', 'estate', 'plaza', 'mall', 'center', 'centre'];
+
+    const firstPart = parts[0].toLowerCase();
+    const isStreetNumber = /^\d+$/.test(parts[0]);
+    const isPropertyName = propertyNameKeywords.some(keyword => firstPart.includes(keyword));
+
+    if (isStreetNumber && parts.length > 1) {
+        return parts[1];
+    }
+
+    if (isPropertyName && parts.length > 1) {
+        return parts[1];
+    }
+
+
+    if (/^\d+/.test(parts[0]) && parts.length > 1) {
+        return parts[1];
+    }
+
+    return parts[0];
+};
+
 exports.getLocations = async (req, res, next) => {
     try {
-        // Get locations sorted by lead count (top 7 only)
         const locations = await leadModal.aggregate([
             { $match: { isStatus: true } },
             {
@@ -995,9 +1015,39 @@ exports.getLocations = async (req, res, next) => {
             }
         ]);
 
-        const uniqueLocations = locations.map(item => item.location).filter(Boolean);
+        const locationsWithLocality = locations.map(item => {
+            const locality = extractLocality(item.location);
+            return {
+                ...item,
+                location: locality || item.location,
+                originalLocation: item.location
+            };
+        }).filter(item => item.location);
 
-        logInfo('Top 7 locations fetched by lead count', {
+
+        const localityMap = new Map();
+        locationsWithLocality.forEach(item => {
+            const locality = item.location;
+            if (localityMap.has(locality)) {
+
+                localityMap.set(locality, {
+                    location: locality,
+                    propertyCount: localityMap.get(locality).propertyCount + item.propertyCount
+                });
+            } else {
+                localityMap.set(locality, {
+                    location: locality,
+                    propertyCount: item.propertyCount
+                });
+            }
+        });
+
+
+        const uniqueLocations = Array.from(localityMap.values())
+            .sort((a, b) => b.propertyCount - a.propertyCount)
+            .map(item => item.location);
+
+        logInfo('Top 7 locations fetched by lead count (locality only)', {
             totalLocations: uniqueLocations.length
         });
 
@@ -1006,7 +1056,7 @@ exports.getLocations = async (req, res, next) => {
             message: "Locations fetched successfully",
             data: {
                 locations: uniqueLocations,
-                locationsWithCount: locations,
+                locationsWithCount: Array.from(localityMap.values()),
                 total: uniqueLocations.length
             }
         });
@@ -1077,7 +1127,6 @@ exports.getPropertyById = async (req, res, next) => {
 
         const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-        // Format images array (cover first, then by order)
         const images = formatPropertyImages(property.images);
         const mainImage = images.length > 0 ? images[0] : null;
         const thumbnails = images.slice(1, 5);
@@ -1101,15 +1150,11 @@ exports.getPropertyById = async (req, res, next) => {
             }
         };
 
-        // Get user ID if authenticated
         const userId = req.user?.userId || null;
         const isAuthenticated = !!userId;
 
-        // Check if property is favorited by the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
-        // Check if user has joined the group for this property
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
-        // Check if user has booked a visit for this property
         const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
         const propertyId = property._id.toString();
         const isFavorite = favoritePropertyIds.has(propertyId);
@@ -1168,8 +1213,8 @@ exports.getPropertyById = async (req, res, next) => {
             rating: 5,
             highlights: property.highlights || [],
             amenities: property.amenities || [],
-            images: images, // Array of all images (cover first, then by order)
-            image: mainImage, // Keep for backward compatibility
+            images: images,
+            image: mainImage,
             imageDetails: {
                 main: mainImage,
                 thumbnails: thumbnails
@@ -1748,7 +1793,7 @@ const createNotification = async (leadId, notificationType, source, sourceId, ti
 exports.joinGroup = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, source = "origin" } = req.body;
+        const { propertyId, source = "origin", ipAddress: ipAddressFromBody } = req.body;
 
         const property = await Property.findById(propertyId)
             .populate('relationshipManager', 'name email phone')
@@ -1774,7 +1819,7 @@ exports.joinGroup = async (req, res) => {
                 propertyId
             });
         } else {
-            const ipAddress = getClientIpAddress(req);
+            const ipAddress = ipAddressFromBody || getClientIpAddress(req);
 
             lead = await leadModal.create({
                 userId,
@@ -1790,7 +1835,8 @@ exports.joinGroup = async (req, res) => {
             logInfo('New lead created for join group', {
                 leadId: lead._id,
                 userId,
-                propertyId
+                propertyId,
+                ipAddress: ipAddress
             });
         }
 
@@ -1836,7 +1882,7 @@ exports.joinGroup = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
+        const { propertyId, visitDate, visitTime, source = "origin", ipAddress: ipAddressFromBody } = req.body;
 
         const property = await Property.findById(propertyId)
             .populate('relationshipManager', 'name email phone')
@@ -1903,7 +1949,7 @@ exports.registerVisit = async (req, res) => {
                 }
             );
         } else {
-            const ipAddress = getClientIpAddress(req);
+            const ipAddress = ipAddressFromBody || getClientIpAddress(req);
 
             lead = await leadModal.create({
                 userId,
@@ -1915,6 +1961,12 @@ exports.registerVisit = async (req, res) => {
                 source: source || "origin",
                 updatedBy: userId,
                 visitStatus: 'visited',
+                ipAddress: ipAddress
+            });
+            logInfo('New lead created for visit registration', {
+                leadId: lead._id,
+                userId,
+                propertyId,
                 ipAddress: ipAddress
             });
         }
@@ -2157,7 +2209,7 @@ exports.getAllBlogs = async (req, res, next) => {
             category,
             tag,
             search,
-            sortBy = 'newest' // newest, oldest, views
+            sortBy = 'newest'
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -2373,23 +2425,17 @@ exports.compareProperties = async (req, res, next) => {
             });
         }
 
-        // Get user ID if authenticated
         const userId = req.user?.userId || null;
         const isAuthenticated = !!userId;
 
-        // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
-        // Get joined group property IDs for the user
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
-        // Sort properties to match the order of propertyIds in the request
-        // This ensures pin labels (A, B, C) match the order properties were selected
+
         const propertyMap = new Map(properties.map(p => [p._id.toString(), p]));
         const orderedProperties = propertyIds.map(id => propertyMap.get(id.toString())).filter(Boolean);
 
-        // Add pin labels (A, B, C, D...) to each property based on the order they were selected
         const formattedProperties = orderedProperties.map((property, index) => {
-            // Generate pin label: A, B, C, D, etc. (65 is ASCII for 'A')
             const pinLabel = String.fromCharCode(65 + index);
 
             const propertyId = property._id.toString();
@@ -2441,11 +2487,9 @@ exports.compareProperties = async (req, res, next) => {
 
             const unitTypes = [...new Set(property.configurations.map(config => config.unitType).filter(Boolean))];
 
-            // Format images array (cover first, then by order)
             const images = formatPropertyImages(property.images);
 
             const floorPlans = [];
-            // Format fullConfigurations with all nested data including layout images
             const fullConfigurations = [];
 
             if (property.configurations && Array.isArray(property.configurations)) {
@@ -2468,7 +2512,6 @@ exports.compareProperties = async (req, res, next) => {
 
                             configData.subConfigurations.push(subConfigData);
 
-                            // Add to floorPlans if layout images exist
                             if (subConfig.layoutPlanImages && subConfig.layoutPlanImages.length > 0) {
                                 subConfig.layoutPlanImages.forEach(imageUrl => {
                                     floorPlans.push({
@@ -2487,7 +2530,6 @@ exports.compareProperties = async (req, res, next) => {
                 });
             }
 
-            // Legacy layouts support (if exists)
             if (property.layouts && Array.isArray(property.layouts)) {
                 property.layouts.forEach(layout => {
                     floorPlans.push({
@@ -2506,13 +2548,11 @@ exports.compareProperties = async (req, res, next) => {
                 });
             }
 
-            // Ensure latitude and longitude are valid numbers
             const latitude = property.latitude && !isNaN(property.latitude) && isFinite(property.latitude)
                 ? parseFloat(property.latitude) : null;
             const longitude = property.longitude && !isNaN(property.longitude) && isFinite(property.longitude)
                 ? parseFloat(property.longitude) : null;
 
-            // Check if property has valid map coordinates
             const hasMapCoordinates = latitude !== null && longitude !== null &&
                 latitude >= -90 && latitude <= 90 &&
                 longitude >= -180 && longitude <= 180;
@@ -2526,8 +2566,8 @@ exports.compareProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: latitude,
                 longitude: longitude,
-                hasMapCoordinates: hasMapCoordinates, // Flag to indicate if property can be shown on map
-                pinLabel: pinLabel, // A, B, C, D, etc. - Always included for all properties
+                hasMapCoordinates: hasMapCoordinates,
+                pinLabel: pinLabel,
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
                 isBookVisit: isBookVisit,
@@ -2552,8 +2592,8 @@ exports.compareProperties = async (req, res, next) => {
                 },
                 configurations: unitTypes,
                 configurationsFormatted: unitTypes.join(', '),
-                images: images, // Array of all images (cover first, then by order)
-                mainImage: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                images: images,
+                mainImage: images.length > 0 ? images[0] : null,
                 floorPlans: floorPlans,
                 possessionDate: property.possessionDate,
                 possessionDateFormatted: possessionDateFormatted,
@@ -2568,7 +2608,6 @@ exports.compareProperties = async (req, res, next) => {
             };
         });
 
-        // Log pin labels for debugging
         const pinLabelsInfo = formattedProperties.map(p => ({
             id: p.id,
             projectName: p.projectName,
@@ -2589,7 +2628,6 @@ exports.compareProperties = async (req, res, next) => {
             message: 'Properties fetched for comparison',
             data: formattedProperties,
             count: formattedProperties.length,
-            // Include metadata about pin labels for frontend
             metadata: {
                 totalProperties: formattedProperties.length,
                 propertiesWithCoordinates: formattedProperties.filter(p => p.hasMapCoordinates).length,
@@ -2751,44 +2789,36 @@ exports.getAllProperties = async (req, res, next) => {
             search,
             latitude,
             longitude,
-            radius = 30 // Default 30 km radius
+            radius = 30
         } = req.query;
 
         page = parseInt(page);
         limit = parseInt(limit);
         const skip = (page - 1) * limit;
 
-        // Build filter
         const filter = { isStatus: true };
 
-        // Search by property name if search keyword provided
         if (search && search.trim()) {
             filter.projectName = { $regex: search.trim(), $options: 'i' };
         }
 
-        // Get user ID if authenticated
         const userId = req.user?.userId || null;
         const isAuthenticated = !!userId;
 
-        // Get favorite property IDs for the user
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
-        // Get joined group property IDs for the user
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
 
-        // Get all properties matching the filter
         let properties = await Property.find(filter)
             .populate('developer', 'developerName')
             .populate('relationshipManager', 'name email phone')
             .select('projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer reraId description relationshipManager possessionDate createdAt')
             .lean();
 
-        // Location-based filtering (30 km radius) if latitude and longitude provided
         if (latitude && longitude) {
             const userLat = parseFloat(latitude);
             const userLon = parseFloat(longitude);
             const radiusKm = parseFloat(radius) || 30;
 
-            // Validate coordinates
             if (isNaN(userLat) || isNaN(userLon) || userLat < -90 || userLat > 90 || userLon < -180 || userLon > 180) {
                 return res.status(400).json({
                     success: false,
@@ -2796,9 +2826,8 @@ exports.getAllProperties = async (req, res, next) => {
                 });
             }
 
-            // Haversine formula to calculate distance between two points
             const calculateDistance = (lat1, lon1, lat2, lon2) => {
-                const R = 6371; // Earth's radius in kilometers
+                const R = 6371;
                 const dLat = (lat2 - lat1) * Math.PI / 180;
                 const dLon = (lon2 - lon1) * Math.PI / 180;
                 const a =
@@ -2806,13 +2835,12 @@ exports.getAllProperties = async (req, res, next) => {
                     Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
                     Math.sin(dLon / 2) * Math.sin(dLon / 2);
                 const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                return R * c; // Distance in kilometers
+                return R * c;
             };
 
-            // Filter properties within radius
             properties = properties.filter(property => {
                 if (!property.latitude || !property.longitude) {
-                    return false; // Exclude properties without coordinates
+                    return false;
                 }
                 const distance = calculateDistance(
                     userLat,
@@ -2820,18 +2848,14 @@ exports.getAllProperties = async (req, res, next) => {
                     property.latitude,
                     property.longitude
                 );
-                property.distance = distance; // Add distance to property object
+                property.distance = distance;
                 return distance <= radiusKm;
             });
 
-            // Sort by distance (nearest first)
             properties.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity));
         }
 
-        // If no search keyword and no location filter, use default listing logic
-        // (sort by lead count or creation date)
         if (!search && !latitude && !longitude) {
-            // Get lead counts for properties
             const propertyIds = properties.map(p => p._id);
             const leadCounts = await leadModal.aggregate([
                 { $match: { propertyId: { $in: propertyIds }, isStatus: true } },
@@ -2842,13 +2866,11 @@ exports.getAllProperties = async (req, res, next) => {
                 leadCounts.map(item => [item._id.toString(), item.count])
             );
 
-            // Add lead count to properties
             properties = properties.map(prop => ({
                 ...prop,
                 leadCount: leadCountMap.get(prop._id.toString()) || 0
             }));
 
-            // Sort by lead count (descending), then by creation date
             properties.sort((a, b) => {
                 if (b.leadCount !== a.leadCount) {
                     return b.leadCount - a.leadCount;
@@ -2857,15 +2879,11 @@ exports.getAllProperties = async (req, res, next) => {
             });
         }
 
-        // Calculate total before pagination
         const total = properties.length;
 
-        // Apply pagination
         const paginatedProperties = properties.slice(skip, skip + limit);
 
-        // Format properties for response
         const formattedProperties = paginatedProperties.map(property => {
-            // Helper to parse price (handles both number and string)
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -2884,7 +2902,6 @@ exports.getAllProperties = async (req, res, next) => {
             const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-            // Get unit types
             const unitTypes = [];
             if (property.configurations && Array.isArray(property.configurations)) {
                 property.configurations.forEach(config => {
@@ -2895,7 +2912,6 @@ exports.getAllProperties = async (req, res, next) => {
             }
             const uniqueUnitTypes = [...new Set(unitTypes)];
 
-            // Format images array (cover first, then by order)
             const images = formatPropertyImages(property.images);
 
             const formatPrice = (amount) => {
@@ -2920,8 +2936,8 @@ exports.getAllProperties = async (req, res, next) => {
                 location: property.location,
                 latitude: property.latitude || null,
                 longitude: property.longitude || null,
-                images: images, // Array of images (cover first, then by order)
-                image: images.length > 0 ? images[0] : null, // Keep for backward compatibility
+                images: images,
+                image: images.length > 0 ? images[0] : null,
                 isFavorite: isFavorite,
                 isJoinGroup: isJoinGroup,
                 isBookVisit: isBookVisit,
