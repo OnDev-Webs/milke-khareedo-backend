@@ -3334,7 +3334,7 @@ exports.getCRMDashboard = async (req, res, next) => {
 
         const propertyIds = userProperties.map(p => p._id);
 
-        const now = new Date();
+        let now = new Date();
         let dateFilter = {};
 
         if (dateRange === 'past_24_hours') {
@@ -3364,7 +3364,23 @@ exports.getCRMDashboard = async (req, res, next) => {
                         leadsContactedPercentage: 0,
                         responseTime: "0H"
                     },
-                    todaysFollowUps: [],
+                    followUps: {
+                        today: {
+                            label: "Today's Follow Ups",
+                            count: 0,
+                            data: []
+                        },
+                        yesterday: {
+                            label: "Yesterday's Follow Ups",
+                            count: 0,
+                            data: []
+                        },
+                        thisMonth: {
+                            label: "This Month's Follow Ups",
+                            count: 0,
+                            data: []
+                        }
+                    },
                     leads: [],
                     pagination: {
                         total: 0,
@@ -3441,15 +3457,77 @@ exports.getCRMDashboard = async (req, res, next) => {
             ? Math.round((contactedLeads / totalLeads) * 100)
             : 0;
 
-        const today = new Date();
+        // Calculate date ranges for follow-ups
+        const today = new Date(now);
         today.setHours(0, 0, 0, 0);
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        const followUpActivities = await LeadActivity.find({
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+
+        const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        firstDayOfMonth.setHours(0, 0, 0, 0);
+
+        // Helper function to format follow-up data
+        const formatFollowUpData = (activity) => {
+            const lead = activity.leadId;
+            if (!lead) return null;
+
+            const user = lead.userId || {};
+            const property = lead.propertyId || {};
+
+            const followUpDate = new Date(activity.nextFollowUpDate);
+            const day = followUpDate.getDate();
+            const month = followUpDate.toLocaleDateString('en-IN', { month: 'long' });
+            const year = followUpDate.getFullYear();
+            const time = followUpDate.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+            const formattedDate = `${day} ${month}, ${year}, ${time}`;
+
+            let formattedSource = lead.source || 'origin';
+            if (property.location) {
+                formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
+            }
+
+            let formattedPhone = 'N/A';
+            if (user.phoneNumber) {
+                const countryCode = user.countryCode || '+91';
+                const phoneDigits = user.phoneNumber.replace(/\s/g, '');
+                if (phoneDigits.length === 10) {
+                    formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
+                } else {
+                    formattedPhone = `${countryCode} ${user.phoneNumber}`;
+                }
+            }
+
+            return {
+                _id: lead._id,
+                clientName: user.name || 'N/A',
+                phoneNumber: formattedPhone,
+                profileImage: user.profileImage || null,
+                projectName: property.projectName || 'N/A',
+                location: property.location || 'N/A',
+                date: formattedDate,
+                dueTime: followUpDate.toLocaleTimeString('en-IN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                }),
+                source: formattedSource,
+                createdAt: lead.createdAt,
+                updatedAt: lead.updatedAt
+            };
+        };
+
+        // Fetch all follow-up activities for the user's properties (Today, Yesterday, This Month)
+        const allFollowUpActivities = await LeadActivity.find({
             activityType: 'follow_up',
             nextFollowUpDate: {
-                $gte: today,
+                $gte: firstDayOfMonth,
                 $lt: tomorrow
             }
         })
@@ -3473,58 +3551,50 @@ exports.getCRMDashboard = async (req, res, next) => {
             .sort({ nextFollowUpDate: 1 })
             .lean();
 
-        const todaysFollowUps = followUpActivities
-            .filter(activity => activity.leadId !== null)
-            .map(activity => {
-                const lead = activity.leadId;
-                const user = lead.userId || {};
-                const property = lead.propertyId || {};
+        // Filter and group follow-ups by time period
+        const todaysFollowUps = [];
+        const yesterdaysFollowUps = [];
+        const thisMonthFollowUps = [];
 
-                const followUpDate = new Date(activity.nextFollowUpDate);
-                const day = followUpDate.getDate();
-                const month = followUpDate.toLocaleDateString('en-IN', { month: 'long' });
-                const year = followUpDate.getFullYear();
-                const time = followUpDate.toLocaleTimeString('en-IN', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: true
-                });
-                const formattedDate = `${day} ${month}, ${year}, ${time}`;
+        allFollowUpActivities.forEach(activity => {
+            if (!activity.leadId) return;
 
-                let formattedSource = lead.source || 'origin';
-                if (property.location) {
-                    formattedSource = `${property.location} - ${formattedSource.charAt(0).toUpperCase() + formattedSource.slice(1)}.`;
-                }
+            const followUpDate = new Date(activity.nextFollowUpDate);
+            const formattedData = formatFollowUpData(activity);
+            if (!formattedData) return;
 
-                let formattedPhone = 'N/A';
-                if (user.phoneNumber) {
-                    const countryCode = user.countryCode || '+91';
-                    const phoneDigits = user.phoneNumber.replace(/\s/g, '');
-                    if (phoneDigits.length === 10) {
-                        formattedPhone = `${countryCode} ${phoneDigits.slice(0, 3)} ${phoneDigits.slice(3, 6)} ${phoneDigits.slice(6)}`;
-                    } else {
-                        formattedPhone = `${countryCode} ${user.phoneNumber}`;
-                    }
-                }
+            // Today's follow-ups
+            if (followUpDate >= today && followUpDate < tomorrow) {
+                todaysFollowUps.push(formattedData);
+            }
+            // Yesterday's follow-ups
+            else if (followUpDate >= yesterday && followUpDate < today) {
+                yesterdaysFollowUps.push(formattedData);
+            }
+            // This month's follow-ups (excluding today and yesterday)
+            else if (followUpDate >= firstDayOfMonth && followUpDate < yesterday) {
+                thisMonthFollowUps.push(formattedData);
+            }
+        });
 
-                return {
-                    _id: lead._id,
-                    clientName: user.name || 'N/A',
-                    phoneNumber: formattedPhone,
-                    profileImage: user.profileImage || null,
-                    projectName: property.projectName || 'N/A',
-                    location: property.location || 'N/A',
-                    date: formattedDate,
-                    dueTime: followUpDate.toLocaleTimeString('en-IN', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: true
-                    }),
-                    source: formattedSource,
-                    createdAt: lead.createdAt,
-                    updatedAt: lead.updatedAt
-                };
-            });
+        // Group follow-ups with counts as per design
+        const followUps = {
+            today: {
+                label: "Today's Follow Ups",
+                count: todaysFollowUps.length,
+                data: todaysFollowUps
+            },
+            yesterday: {
+                label: "Yesterday's Follow Ups",
+                count: yesterdaysFollowUps.length,
+                data: yesterdaysFollowUps
+            },
+            thisMonth: {
+                label: "This Month's Follow Ups",
+                count: thisMonthFollowUps.length,
+                data: thisMonthFollowUps
+            }
+        };
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -3568,17 +3638,28 @@ exports.getCRMDashboard = async (req, res, next) => {
                 { $unwind: { path: '$property', preserveNullAndEmptyArrays: true } }
             ]);
 
-            leads = leadsAggregation.map(item => ({
-                _id: item._id,
-                userId: item.user || null,
-                propertyId: item.property || null,
-                createdAt: item.createdAt,
-                date: item.date,
-                source: item.source,
-                visitStatus: item.visitStatus,
-                status: item.status,
-                updatedAt: item.updatedAt
+            // Populate userId and propertyId for aggregation results
+            const populatedLeads = await Promise.all(leadsAggregation.map(async (item) => {
+                const userId = item.user?._id || item.userId;
+                const propertyId = item.property?._id || item.propertyId;
+
+                const user = userId ? await User.findById(userId).select('name email phoneNumber countryCode profileImage').lean() : null;
+                const property = propertyId ? await Property.findById(propertyId).select('projectName location').lean() : null;
+
+                return {
+                    _id: item._id,
+                    userId: user,
+                    propertyId: property,
+                    createdAt: item.createdAt,
+                    date: item.date,
+                    source: item.source,
+                    visitStatus: item.visitStatus,
+                    status: item.status,
+                    updatedAt: item.updatedAt
+                };
             }));
+
+            leads = populatedLeads;
         } else {
             let sortCriteria = {};
             if (sortBy === 'newest_first') {
@@ -3607,10 +3688,247 @@ exports.getCRMDashboard = async (req, res, next) => {
                 .lean();
         }
 
-        const formattedLeads = leads.map(lead => {
+        // Build unified timeline for each lead (combining LeadModal creation + LeadActivity entries)
+        const leadIds = leads.map(lead => lead._id || lead._id?.toString()).filter(Boolean);
+
+        // Fetch all activities for these leads
+        const allActivities = await LeadActivity.find({
+            leadId: { $in: leadIds }
+        })
+            .populate('performedBy', 'name email phone profileImage')
+            .sort({ activityDate: -1 })
+            .lean();
+
+        // Group activities by leadId
+        const activitiesByLeadId = {};
+        allActivities.forEach(activity => {
+            const leadIdStr = activity.leadId?.toString();
+            if (leadIdStr) {
+                if (!activitiesByLeadId[leadIdStr]) {
+                    activitiesByLeadId[leadIdStr] = [];
+                }
+                activitiesByLeadId[leadIdStr].push(activity);
+            }
+        });
+
+        // Helper function to format timeline entry
+        const formatTimelineEntry = (entry, activityType, actor, description, scheduledFor = null) => {
+            const date = new Date(entry.timestamp || entry.activityDate || entry.createdAt);
+            const day = date.getDate();
+            const month = date.toLocaleDateString('en-IN', { month: 'short' });
+            const year = date.getFullYear();
+            const time = date.toLocaleTimeString('en-IN', {
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+            const formattedTimestamp = `${day} ${month} ${year}, ${time}`;
+
+            return {
+                timestamp: formattedTimestamp,
+                description: description,
+                activityType: activityType,
+                actor: actor,
+                scheduledFor: scheduledFor,
+                leadId: entry.leadId || entry._id?.toString(),
+                activityId: entry.activityId || entry._id?.toString(),
+                rawDate: date
+            };
+        };
+
+        // Build timeline for each lead
+        const formattedLeads = await Promise.all(leads.map(async (lead) => {
             const user = lead.userId || {};
             const property = lead.propertyId || {};
+            const leadIdStr = lead._id?.toString();
 
+            // Start with "Lead Received" from LeadModal creation (only once)
+            const leadCreatedDate = new Date(lead.createdAt || lead.date);
+            const timeline = [
+                formatTimelineEntry(
+                    { _id: lead._id, createdAt: leadCreatedDate },
+                    'lead_received',
+                    null,
+                    'Lead Received',
+                    null
+                )
+            ];
+
+            // Add activities from LeadActivity, filtering out duplicates
+            // Sort activities chronologically (oldest first) to properly detect reschedules
+            const activities = (activitiesByLeadId[leadIdStr] || []).sort((a, b) =>
+                new Date(a.activityDate) - new Date(b.activityDate)
+            );
+            const seenActivities = new Set();
+            const seenFollowUps = new Map(); // Track follow-ups to detect reschedules
+            const seenVisits = new Map(); // Track visits to detect reschedules
+
+            activities.forEach(activity => {
+                const performer = activity.performedBy || {};
+                const actorName = activity.performedByName || performer.name || 'Admin';
+                const activityDate = new Date(activity.activityDate);
+
+                // Skip duplicate "lead_received" or "join_group" activities (we already have it from LeadModal)
+                if (activity.activityType === 'lead_received' || activity.activityType === 'join_group') {
+                    return;
+                }
+
+                // Handle follow_up activities
+                if (activity.activityType === 'follow_up') {
+                    const followUpKey = `follow_up_${leadIdStr}`;
+                    const existingFollowUp = seenFollowUps.get(followUpKey);
+
+                    if (existingFollowUp) {
+                        // This is a reschedule - show as "Rescheduled"
+                        const scheduledDate = activity.nextFollowUpDate
+                            ? new Date(activity.nextFollowUpDate).toLocaleDateString('en-IN', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                            })
+                            : null;
+                        timeline.push(formatTimelineEntry(
+                            activity,
+                            'follow_up_rescheduled',
+                            actorName,
+                            `Follow up rescheduled by ${actorName}${scheduledDate ? ` for ${scheduledDate}` : ''}`,
+                            scheduledDate
+                        ));
+                    } else {
+                        // First follow-up for this lead
+                        const scheduledDate = activity.nextFollowUpDate
+                            ? new Date(activity.nextFollowUpDate).toLocaleDateString('en-IN', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                            })
+                            : null;
+                        timeline.push(formatTimelineEntry(
+                            activity,
+                            'follow_up',
+                            actorName,
+                            `Follow up scheduled by ${actorName}${scheduledDate ? ` for ${scheduledDate}` : ''}`,
+                            scheduledDate
+                        ));
+                        seenFollowUps.set(followUpKey, activity);
+                    }
+                    return;
+                }
+
+                // Handle visit activities
+                if (activity.activityType === 'visit') {
+                    const existingVisit = seenVisits.get(leadIdStr);
+
+                    if (existingVisit) {
+                        // Check if this is a reschedule (different date/time)
+                        const existingDate = existingVisit.visitDate ? new Date(existingVisit.visitDate).toDateString() : null;
+                        const existingTime = existingVisit.visitTime || null;
+                        const newDate = activity.visitDate ? new Date(activity.visitDate).toDateString() : null;
+                        const newTime = activity.visitTime || null;
+
+                        // If date or time changed, it's a reschedule
+                        if ((existingDate !== newDate) || (existingTime !== newTime)) {
+                            const visitDateTime = activity.visitDate && activity.visitTime
+                                ? `${new Date(activity.visitDate).toLocaleDateString('en-IN', {
+                                    day: 'numeric',
+                                    month: 'short',
+                                    year: 'numeric'
+                                })} ${activity.visitTime}`
+                                : activity.visitDate
+                                    ? new Date(activity.visitDate).toLocaleDateString('en-IN', {
+                                        day: 'numeric',
+                                        month: 'short',
+                                        year: 'numeric'
+                                    })
+                                    : 'TBD';
+                            timeline.push(formatTimelineEntry(
+                                activity,
+                                'visit_rescheduled',
+                                actorName,
+                                `Site Visit Rescheduled by ${actorName}${visitDateTime !== 'TBD' ? ` for ${visitDateTime}` : ''}`,
+                                visitDateTime !== 'TBD' ? visitDateTime : null
+                            ));
+                            seenVisits.set(leadIdStr, activity); // Update with new visit details
+                        }
+                        // If same date/time, skip duplicate
+                        return;
+                    } else {
+                        // First visit for this lead
+                        const visitDateTime = activity.visitDate && activity.visitTime
+                            ? `${new Date(activity.visitDate).toLocaleDateString('en-IN', {
+                                day: 'numeric',
+                                month: 'short',
+                                year: 'numeric'
+                            })} ${activity.visitTime}`
+                            : activity.visitDate
+                                ? new Date(activity.visitDate).toLocaleDateString('en-IN', {
+                                    day: 'numeric',
+                                    month: 'short',
+                                    year: 'numeric'
+                                })
+                                : 'TBD';
+                        timeline.push(formatTimelineEntry(
+                            activity,
+                            'visit',
+                            actorName,
+                            `Site Visit Coordinated by ${actorName}${visitDateTime !== 'TBD' ? ` for ${visitDateTime}` : ''}`,
+                            visitDateTime !== 'TBD' ? visitDateTime : null
+                        ));
+                        seenVisits.set(leadIdStr, activity);
+                    }
+                    return;
+                }
+
+                // Handle other activity types (phone_call, whatsapp, email, remark_update, status_update)
+                const activityKey = `${activity.activityType}_${activity._id}`;
+                if (seenActivities.has(activityKey)) {
+                    return; // Skip duplicate
+                }
+                seenActivities.add(activityKey);
+
+                let description = activity.description || '';
+                if (!description) {
+                    // Generate description based on activity type
+                    switch (activity.activityType) {
+                        case 'phone_call':
+                            description = `Phone call by ${actorName}`;
+                            break;
+                        case 'whatsapp':
+                            description = `WhatsApp message by ${actorName}`;
+                            break;
+                        case 'email':
+                            description = `Email sent by ${actorName}`;
+                            break;
+                        case 'remark_update':
+                            description = `Remark updated by ${actorName}`;
+                            break;
+                        case 'status_update':
+                            const oldStatus = activity.oldStatus || 'N/A';
+                            const newStatus = activity.newStatus || 'N/A';
+                            description = `Status updated from ${oldStatus} to ${newStatus} by ${actorName}`;
+                            break;
+                        default:
+                            description = `Activity by ${actorName}`;
+                    }
+                }
+
+                timeline.push(formatTimelineEntry(
+                    activity,
+                    activity.activityType,
+                    actorName,
+                    description,
+                    null
+                ));
+            });
+
+            // Sort timeline by date (newest first)
+            timeline.sort((a, b) => new Date(b.rawDate) - new Date(a.rawDate));
+
+            // Format lead basic info
             const leadDate = new Date(lead.createdAt || lead.date);
             const day = leadDate.getDate();
             const month = leadDate.toLocaleDateString('en-IN', { month: 'long' });
@@ -3650,9 +3968,10 @@ exports.getCRMDashboard = async (req, res, next) => {
                 visitStatus: lead.visitStatus || 'not_visited',
                 status: lead.status || 'pending',
                 createdAt: lead.createdAt,
-                updatedAt: lead.updatedAt
+                updatedAt: lead.updatedAt,
+                timeline: timeline // Add unified timeline
             };
-        });
+        }));
 
         logInfo('CRM Dashboard data fetched', {
             userId,
@@ -3660,7 +3979,9 @@ exports.getCRMDashboard = async (req, res, next) => {
             sortBy,
             totalLeads,
             contactedLeads,
-            todaysFollowUpsCount: todaysFollowUps.length
+            todaysFollowUpsCount: followUps.today.count,
+            yesterdaysFollowUpsCount: followUps.yesterday.count,
+            thisMonthFollowUpsCount: followUps.thisMonth.count
         });
 
         res.json({
@@ -3673,7 +3994,7 @@ exports.getCRMDashboard = async (req, res, next) => {
                     leadsContactedPercentage: leadsContactedPercentage,
                     responseTime: `${avgResponseTimeHours}H`
                 },
-                todaysFollowUps: todaysFollowUps,
+                followUps: followUps,
                 leads: formattedLeads,
                 pagination: {
                     total: totalLeadsCount,
