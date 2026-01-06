@@ -2430,7 +2430,7 @@ exports.compareProperties = async (req, res, next) => {
 
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
-
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
 
         const propertyMap = new Map(properties.map(p => [p._id.toString(), p]));
         const orderedProperties = propertyIds.map(id => propertyMap.get(id.toString())).filter(Boolean);
