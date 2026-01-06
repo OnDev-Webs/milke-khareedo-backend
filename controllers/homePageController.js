@@ -963,6 +963,44 @@ exports.searchProperties = async (req, res, next) => {
 // @desc    Get all unique locations with property counts (sorted by count)
 // @route   GET /api/home/locations
 // @access  Public
+// Helper function to extract locality from full address
+const extractLocality = (fullAddress) => {
+    if (!fullAddress || typeof fullAddress !== 'string') {
+        return null;
+    }
+
+    const parts = fullAddress.split(',').map(part => part.trim()).filter(Boolean);
+
+    if (parts.length === 0) {
+        return null;
+    }
+
+    if (parts.length === 1) {
+        return parts[0];
+    }
+
+    const propertyNameKeywords = ['residency', 'villa', 'tower', 'apartments', 'complex', 'society', 'park', 'heights', 'enclave', 'estate', 'plaza', 'mall', 'center', 'centre'];
+
+    const firstPart = parts[0].toLowerCase();
+    const isStreetNumber = /^\d+$/.test(parts[0]);
+    const isPropertyName = propertyNameKeywords.some(keyword => firstPart.includes(keyword));
+
+    if (isStreetNumber && parts.length > 1) {
+        return parts[1];
+    }
+
+    if (isPropertyName && parts.length > 1) {
+        return parts[1];
+    }
+
+
+    if (/^\d+/.test(parts[0]) && parts.length > 1) {
+        return parts[1];
+    }
+
+    return parts[0];
+};
+
 exports.getLocations = async (req, res, next) => {
     try {
         // Get locations sorted by lead count (top 7 only)
@@ -995,9 +1033,40 @@ exports.getLocations = async (req, res, next) => {
             }
         ]);
 
-        const uniqueLocations = locations.map(item => item.location).filter(Boolean);
+        // Extract locality from each full address
+        const locationsWithLocality = locations.map(item => {
+            const locality = extractLocality(item.location);
+            return {
+                ...item,
+                location: locality || item.location,
+                originalLocation: item.location
+            };
+        }).filter(item => item.location);
 
-        logInfo('Top 7 locations fetched by lead count', {
+
+        const localityMap = new Map();
+        locationsWithLocality.forEach(item => {
+            const locality = item.location;
+            if (localityMap.has(locality)) {
+
+                localityMap.set(locality, {
+                    location: locality,
+                    propertyCount: localityMap.get(locality).propertyCount + item.propertyCount
+                });
+            } else {
+                localityMap.set(locality, {
+                    location: locality,
+                    propertyCount: item.propertyCount
+                });
+            }
+        });
+
+
+        const uniqueLocations = Array.from(localityMap.values())
+            .sort((a, b) => b.propertyCount - a.propertyCount)
+            .map(item => item.location);
+
+        logInfo('Top 7 locations fetched by lead count (locality only)', {
             totalLocations: uniqueLocations.length
         });
 
@@ -1006,7 +1075,7 @@ exports.getLocations = async (req, res, next) => {
             message: "Locations fetched successfully",
             data: {
                 locations: uniqueLocations,
-                locationsWithCount: locations,
+                locationsWithCount: Array.from(localityMap.values()),
                 total: uniqueLocations.length
             }
         });
