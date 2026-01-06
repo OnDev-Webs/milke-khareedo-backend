@@ -38,7 +38,6 @@ const getFavoritePropertyIds = async (userId) => {
     }
 };
 
-// Helper function to get joined group property IDs for a user (properties where user has a lead)
 const getJoinedGroupPropertyIds = async (userId) => {
     if (!userId) return new Set();
     try {
@@ -54,11 +53,9 @@ const getJoinedGroupPropertyIds = async (userId) => {
     }
 };
 
-// Helper function to get booked visit property IDs for a user (properties where user has booked a visit)
 const getBookedVisitPropertyIds = async (userId) => {
     if (!userId) return new Set();
     try {
-        // Find leads for the user
         const userLeads = await leadModal.find({
             userId: userId,
             isStatus: true,
@@ -69,18 +66,15 @@ const getBookedVisitPropertyIds = async (userId) => {
 
         if (leadIds.length === 0) return new Set();
 
-        // Find LeadActivity records with activityType 'visit' for these leads
         const visitActivities = await LeadActivity.find({
             leadId: { $in: leadIds },
             activityType: 'visit'
         }).select('leadId').lean();
 
-        // Create a map of leadId to propertyId
         const leadToPropertyMap = new Map(
             userLeads.map(lead => [lead._id.toString(), lead.propertyId?.toString()])
         );
 
-        // Get unique propertyIds from visit activities
         const propertyIds = visitActivities
             .map(activity => leadToPropertyMap.get(activity.leadId.toString()))
             .filter(Boolean);
@@ -98,31 +92,24 @@ const formatPropertyImages = (images) => {
         return [];
     }
 
-    // Separate cover image and other images
     const coverImages = images.filter(img => img.isCover === true);
     const otherImages = images.filter(img => !img.isCover || img.isCover === false);
 
-    // Sort cover images (should only be one, but handle multiple)
     coverImages.sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    // Sort other images by order
     otherImages.sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    // Combine: cover first, then others
     const sortedImages = [...coverImages, ...otherImages];
 
-    // Return array of image URLs
     return sortedImages.map(img => {
-        // Handle both object format { url, isCover, order } and string format
         if (typeof img === 'string') {
             return img;
         }
         return img.url || img;
-    }).filter(Boolean); // Remove any null/undefined values
+    }).filter(Boolean);
 };
 
-// Helper function to extract prices from configurations (handles both old and new format)
-// Price is now stored as Number (in rupees), but we handle legacy string format too
+
 const extractPricesFromConfigurations = (configurations, fallbackPrice = 0) => {
     const prices = [];
     if (!configurations || !Array.isArray(configurations)) return prices;
@@ -2222,7 +2209,7 @@ exports.getAllBlogs = async (req, res, next) => {
             category,
             tag,
             search,
-            sortBy = 'newest' // newest, oldest, views
+            sortBy = 'newest'
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -2561,13 +2548,11 @@ exports.compareProperties = async (req, res, next) => {
                 });
             }
 
-            // Ensure latitude and longitude are valid numbers
             const latitude = property.latitude && !isNaN(property.latitude) && isFinite(property.latitude)
                 ? parseFloat(property.latitude) : null;
             const longitude = property.longitude && !isNaN(property.longitude) && isFinite(property.longitude)
                 ? parseFloat(property.longitude) : null;
 
-            // Check if property has valid map coordinates
             const hasMapCoordinates = latitude !== null && longitude !== null &&
                 latitude >= -90 && latitude <= 90 &&
                 longitude >= -180 && longitude <= 180;
