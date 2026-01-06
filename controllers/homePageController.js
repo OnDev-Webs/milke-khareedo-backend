@@ -1748,7 +1748,7 @@ const createNotification = async (leadId, notificationType, source, sourceId, ti
 exports.joinGroup = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, source = "origin" } = req.body;
+        const { propertyId, source = "origin", ipAddress: ipAddressFromBody } = req.body;
 
         const property = await Property.findById(propertyId)
             .populate('relationshipManager', 'name email phone')
@@ -1773,8 +1773,10 @@ exports.joinGroup = async (req, res) => {
                 userId,
                 propertyId
             });
+            // IP address should not be updated for existing leads
         } else {
-            const ipAddress = getClientIpAddress(req);
+            // Get IP address: prefer from request body, fallback to extracting from request headers
+            const ipAddress = ipAddressFromBody || getClientIpAddress(req);
 
             lead = await leadModal.create({
                 userId,
@@ -1785,12 +1787,13 @@ exports.joinGroup = async (req, res) => {
                 isStatus: true,
                 source: source || "origin",
                 updatedBy: userId,
-                ipAddress: ipAddress
+                ipAddress: ipAddress // Store IP address only on first lead creation
             });
             logInfo('New lead created for join group', {
                 leadId: lead._id,
                 userId,
-                propertyId
+                propertyId,
+                ipAddress: ipAddress
             });
         }
 
@@ -1836,7 +1839,7 @@ exports.joinGroup = async (req, res) => {
 exports.registerVisit = async (req, res) => {
     try {
         const userId = req.user.userId;
-        const { propertyId, visitDate, visitTime, source = "origin" } = req.body;
+        const { propertyId, visitDate, visitTime, source = "origin", ipAddress: ipAddressFromBody } = req.body;
 
         const property = await Property.findById(propertyId)
             .populate('relationshipManager', 'name email phone')
@@ -1900,10 +1903,12 @@ exports.registerVisit = async (req, res) => {
                 {
                     visitStatus: 'visited',
                     updatedBy: userId
+                    // IP address should not be updated for existing leads
                 }
             );
         } else {
-            const ipAddress = getClientIpAddress(req);
+            // Get IP address: prefer from request body, fallback to extracting from request headers
+            const ipAddress = ipAddressFromBody || getClientIpAddress(req);
 
             lead = await leadModal.create({
                 userId,
@@ -1915,6 +1920,12 @@ exports.registerVisit = async (req, res) => {
                 source: source || "origin",
                 updatedBy: userId,
                 visitStatus: 'visited',
+                ipAddress: ipAddress // Store IP address only on first lead creation
+            });
+            logInfo('New lead created for visit registration', {
+                leadId: lead._id,
+                userId,
+                propertyId,
                 ipAddress: ipAddress
             });
         }
