@@ -32,10 +32,8 @@ exports.loginOrRegister = async (req, res, next) => {
             });
         }
 
-        // Check if user exists by phone number
         let user = await User.findOne({ phoneNumber });
 
-        // If user exists, check if account is active
         if (user && user.isActive === false) {
             return res.status(403).json({
                 success: false,
@@ -59,39 +57,15 @@ exports.loginOrRegister = async (req, res, next) => {
 
         let otpType = 'login';
 
-        // If user doesn't exist, create a new user with temporary values
         if (!user) {
-            // Generate temporary email based on phone number
-            const tempEmail = `temp_${phoneNumber}@milke-khareedo.com`;
-
-            // Check if this temp email already exists (very unlikely but handle it)
-            let existingUserWithEmail = await User.findOne({ email: tempEmail });
-            if (existingUserWithEmail) {
-                // If somehow exists, use phone number with timestamp
-                const tempEmailWithTimestamp = `temp_${phoneNumber}_${Date.now()}@milke-khareedo.com`;
-
-                user = await User.create({
-                    firstName: 'User',
-                    lastName: phoneNumber.slice(-4), // Use last 4 digits as temporary lastName
-                    email: tempEmailWithTimestamp,
-                    phoneNumber,
-                    countryCode: finalCountryCode,
-                    password: `temp_${phoneNumber}_${Date.now()}`, // Temporary password
-                    role: defaultRole._id,
-                    isPhoneVerified: false
-                });
-            } else {
-                user = await User.create({
-                    firstName: 'User',
-                    lastName: phoneNumber.slice(-4), // Use last 4 digits as temporary lastName
-                    email: tempEmail,
-                    phoneNumber,
-                    countryCode: finalCountryCode,
-                    password: `temp_${phoneNumber}_${Date.now()}`, // Temporary password
-                    role: defaultRole._id,
-                    isPhoneVerified: false
-                });
-            }
+            user = await User.create({
+                firstName: 'User',
+                phoneNumber,
+                countryCode: finalCountryCode,
+                password: `temp_${phoneNumber}_${Date.now()}`,
+                role: defaultRole._id,
+                isPhoneVerified: false
+            });
 
             otpType = 'registration';
             logInfo('New user created for phone-based login/register', { userId: user._id, phoneNumber });
@@ -99,14 +73,12 @@ exports.loginOrRegister = async (req, res, next) => {
             logInfo('Existing user found for phone-based login', { userId: user._id, phoneNumber });
         }
 
-        // Delete any existing unverified OTPs for this user
         await OTP.deleteMany({
             userId: user._id,
             type: otpType,
             isVerified: false
         });
 
-        // Generate and save OTP
         const otp = generateOTP();
         const expiresAt = new Date();
         expiresAt.setMinutes(expiresAt.getMinutes() + 10);
@@ -120,7 +92,6 @@ exports.loginOrRegister = async (req, res, next) => {
             expiresAt
         });
 
-        // Send OTP
         const smsResult = await sendOTP(user.phoneNumber, user.countryCode, otp, otpType);
 
         if (!smsResult.success) {
@@ -140,7 +111,7 @@ exports.loginOrRegister = async (req, res, next) => {
                 userId: user._id,
                 phoneNumber: user.phoneNumber,
                 countryCode: user.countryCode,
-                type: otpType, // 'login' or 'registration'
+                type: otpType,
                 requiresOTPVerification: true,
                 otpSent: true
             }
