@@ -2807,6 +2807,7 @@ exports.getAllProperties = async (req, res, next) => {
 
         const favoritePropertyIds = await getFavoritePropertyIds(userId);
         const joinedGroupPropertyIds = await getJoinedGroupPropertyIds(userId);
+        const bookedVisitPropertyIds = await getBookedVisitPropertyIds(userId);
 
         let properties = await Property.find(filter)
             .populate('developer', 'developerName')
@@ -2928,6 +2929,7 @@ exports.getAllProperties = async (req, res, next) => {
             const propertyId = property._id.toString();
             const isFavorite = favoritePropertyIds.has(propertyId);
             const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
             return {
                 id: property._id,
