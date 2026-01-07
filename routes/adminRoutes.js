@@ -43,6 +43,7 @@ router.put('/notifications/mark-all-read', authenticate, adminController.markAll
 // USER MANAGEMENT ROUTES
 router.get('/get_all_user', authenticate, authorizeAdmin, adminController.getAllUsers);
 router.get('/get_all_user_by_id/:id', authenticate, authorizeAdmin, adminController.getUserById);
+router.put('/toggle_user_status/:id', authenticate, authorizeAdmin, adminController.toggleUserStatus);
 
 
 // CREATE PROPERTY ROUTES

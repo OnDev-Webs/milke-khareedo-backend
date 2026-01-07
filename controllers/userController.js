@@ -35,6 +35,14 @@ exports.loginOrRegister = async (req, res, next) => {
         // Check if user exists by phone number
         let user = await User.findOne({ phoneNumber });
 
+        // If user exists, check if account is active
+        if (user && user.isActive === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'Your account has been deactivated. Please contact the administrator.'
+            });
+        }
+
         let defaultRole = await Role.findOne({ name: 'User' }).lean();
         if (!defaultRole) {
             defaultRole = await Role.create({
@@ -348,6 +356,14 @@ exports.verifyOTP = async (req, res, next) => {
             return res.status(404).json({
                 success: false,
                 message: 'User not found with this phone number'
+            });
+        }
+
+        // Check if user account is active
+        if (user.isActive === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'Your account has been deactivated. Please contact the administrator.'
             });
         }
 

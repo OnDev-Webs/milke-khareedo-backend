@@ -121,7 +121,6 @@ exports.adminLogin = async (req, res, next) => {
             .select('+password')
             .populate('role', 'name permissions');
 
-        // ❌ User not found
         if (!user) {
             return res.status(401).json({
                 success: false,
@@ -129,7 +128,6 @@ exports.adminLogin = async (req, res, next) => {
             });
         }
 
-        // ❌ Role not assigned
         if (!user.role || !user.role.name) {
             return res.status(403).json({
                 success: false,
@@ -137,7 +135,6 @@ exports.adminLogin = async (req, res, next) => {
             });
         }
 
-        // ❌ Block only USER role
         if (user.role.name.toLowerCase() === 'user') {
             return res.status(403).json({
                 success: false,
@@ -145,7 +142,13 @@ exports.adminLogin = async (req, res, next) => {
             });
         }
 
-        // ❌ Password mismatch
+        if (user.isActive === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'Your account has been deactivated. Please contact the administrator.'
+            });
+        }
+
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(401).json({
@@ -154,7 +157,6 @@ exports.adminLogin = async (req, res, next) => {
             });
         }
 
-        // ✅ Generate JWT
         const token = jwt.sign(
             {
                 userId: user._id,
@@ -305,6 +307,74 @@ exports.getUserById = async (req, res, next) => {
             data: user
         });
     } catch (error) {
+        next(error);
+    }
+};
+
+// @desc    Toggle user active/deactive status
+// @route   PUT /api/admin/toggle_user_status/:id
+// @access  Private (Admin only)
+exports.toggleUserStatus = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { isActive } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
+            });
+        }
+
+        if (typeof isActive !== 'boolean') {
+            return res.status(400).json({
+                success: false,
+                message: 'isActive must be a boolean value (true or false)'
+            });
+        }
+
+        const user = await User.findById(id).select('-password').populate('role');
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        if (req.user.userId === id && isActive === false) {
+            return res.status(403).json({
+                success: false,
+                message: 'You cannot deactivate your own account'
+            });
+        }
+
+        user.isActive = isActive;
+        await user.save();
+
+        logInfo('User status toggled', {
+            userId: id,
+            isActive: isActive,
+            updatedBy: req.user.userId
+        });
+
+        res.json({
+            success: true,
+            message: `User account has been ${isActive ? 'activated' : 'deactivated'} successfully`,
+            data: {
+                user: {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    name: user.name,
+                    email: user.email,
+                    phoneNumber: user.phoneNumber,
+                    isActive: user.isActive,
+                    role: user.role
+                }
+            }
+        });
+    } catch (error) {
+        logError('Error toggling user status', error, { userId: req.params.id });
         next(error);
     }
 };
@@ -3638,7 +3708,6 @@ exports.getCRMDashboard = async (req, res, next) => {
                 { $unwind: { path: '$property', preserveNullAndEmptyArrays: true } }
             ]);
 
-            // Populate userId and propertyId for aggregation results
             const populatedLeads = await Promise.all(leadsAggregation.map(async (item) => {
                 const userId = item.user?._id || item.userId;
                 const propertyId = item.property?._id || item.propertyId;
@@ -3688,10 +3757,8 @@ exports.getCRMDashboard = async (req, res, next) => {
                 .lean();
         }
 
-        // Build unified timeline for each lead (combining LeadModal creation + LeadActivity entries)
         const leadIds = leads.map(lead => lead._id || lead._id?.toString()).filter(Boolean);
 
-        // Fetch all activities for these leads
         const allActivities = await LeadActivity.find({
             leadId: { $in: leadIds }
         })
@@ -3699,7 +3766,6 @@ exports.getCRMDashboard = async (req, res, next) => {
             .sort({ activityDate: -1 })
             .lean();
 
-        // Group activities by leadId
         const activitiesByLeadId = {};
         allActivities.forEach(activity => {
             const leadIdStr = activity.leadId?.toString();
@@ -3711,7 +3777,6 @@ exports.getCRMDashboard = async (req, res, next) => {
             }
         });
 
-        // Helper function to format timeline entry
         const formatTimelineEntry = (entry, activityType, actor, description, scheduledFor = null) => {
             const date = new Date(entry.timestamp || entry.activityDate || entry.createdAt);
             const day = date.getDate();
@@ -3736,13 +3801,11 @@ exports.getCRMDashboard = async (req, res, next) => {
             };
         };
 
-        // Build timeline for each lead
         const formattedLeads = await Promise.all(leads.map(async (lead) => {
             const user = lead.userId || {};
             const property = lead.propertyId || {};
             const leadIdStr = lead._id?.toString();
 
-            // Start with "Lead Received" from LeadModal creation (only once)
             const leadCreatedDate = new Date(lead.createdAt || lead.date);
             const timeline = [
                 formatTimelineEntry(
@@ -3754,32 +3817,28 @@ exports.getCRMDashboard = async (req, res, next) => {
                 )
             ];
 
-            // Add activities from LeadActivity, filtering out duplicates
-            // Sort activities chronologically (oldest first) to properly detect reschedules
+
             const activities = (activitiesByLeadId[leadIdStr] || []).sort((a, b) =>
                 new Date(a.activityDate) - new Date(b.activityDate)
             );
             const seenActivities = new Set();
-            const seenFollowUps = new Map(); // Track follow-ups to detect reschedules
-            const seenVisits = new Map(); // Track visits to detect reschedules
+            const seenFollowUps = new Map();
+            const seenVisits = new Map();
 
             activities.forEach(activity => {
                 const performer = activity.performedBy || {};
                 const actorName = activity.performedByName || performer.name || 'Admin';
                 const activityDate = new Date(activity.activityDate);
 
-                // Skip duplicate "lead_received" or "join_group" activities (we already have it from LeadModal)
                 if (activity.activityType === 'lead_received' || activity.activityType === 'join_group') {
                     return;
                 }
 
-                // Handle follow_up activities
                 if (activity.activityType === 'follow_up') {
                     const followUpKey = `follow_up_${leadIdStr}`;
                     const existingFollowUp = seenFollowUps.get(followUpKey);
 
                     if (existingFollowUp) {
-                        // This is a reschedule - show as "Rescheduled"
                         const scheduledDate = activity.nextFollowUpDate
                             ? new Date(activity.nextFollowUpDate).toLocaleDateString('en-IN', {
                                 day: 'numeric',
@@ -3797,7 +3856,6 @@ exports.getCRMDashboard = async (req, res, next) => {
                             scheduledDate
                         ));
                     } else {
-                        // First follow-up for this lead
                         const scheduledDate = activity.nextFollowUpDate
                             ? new Date(activity.nextFollowUpDate).toLocaleDateString('en-IN', {
                                 day: 'numeric',
@@ -3824,13 +3882,11 @@ exports.getCRMDashboard = async (req, res, next) => {
                     const existingVisit = seenVisits.get(leadIdStr);
 
                     if (existingVisit) {
-                        // Check if this is a reschedule (different date/time)
                         const existingDate = existingVisit.visitDate ? new Date(existingVisit.visitDate).toDateString() : null;
                         const existingTime = existingVisit.visitTime || null;
                         const newDate = activity.visitDate ? new Date(activity.visitDate).toDateString() : null;
                         const newTime = activity.visitTime || null;
 
-                        // If date or time changed, it's a reschedule
                         if ((existingDate !== newDate) || (existingTime !== newTime)) {
                             const visitDateTime = activity.visitDate && activity.visitTime
                                 ? `${new Date(activity.visitDate).toLocaleDateString('en-IN', {
@@ -3852,12 +3908,10 @@ exports.getCRMDashboard = async (req, res, next) => {
                                 `Site Visit Rescheduled by ${actorName}${visitDateTime !== 'TBD' ? ` for ${visitDateTime}` : ''}`,
                                 visitDateTime !== 'TBD' ? visitDateTime : null
                             ));
-                            seenVisits.set(leadIdStr, activity); // Update with new visit details
+                            seenVisits.set(leadIdStr, activity);
                         }
-                        // If same date/time, skip duplicate
                         return;
                     } else {
-                        // First visit for this lead
                         const visitDateTime = activity.visitDate && activity.visitTime
                             ? `${new Date(activity.visitDate).toLocaleDateString('en-IN', {
                                 day: 'numeric',
@@ -3883,16 +3937,14 @@ exports.getCRMDashboard = async (req, res, next) => {
                     return;
                 }
 
-                // Handle other activity types (phone_call, whatsapp, email, remark_update, status_update)
                 const activityKey = `${activity.activityType}_${activity._id}`;
                 if (seenActivities.has(activityKey)) {
-                    return; // Skip duplicate
+                    return;
                 }
                 seenActivities.add(activityKey);
 
                 let description = activity.description || '';
                 if (!description) {
-                    // Generate description based on activity type
                     switch (activity.activityType) {
                         case 'phone_call':
                             description = `Phone call by ${actorName}`;
@@ -3925,10 +3977,8 @@ exports.getCRMDashboard = async (req, res, next) => {
                 ));
             });
 
-            // Sort timeline by date (newest first)
             timeline.sort((a, b) => new Date(b.rawDate) - new Date(a.rawDate));
 
-            // Format lead basic info
             const leadDate = new Date(lead.createdAt || lead.date);
             const day = leadDate.getDate();
             const month = leadDate.toLocaleDateString('en-IN', { month: 'long' });
@@ -3969,7 +4019,7 @@ exports.getCRMDashboard = async (req, res, next) => {
                 status: lead.status || 'pending',
                 createdAt: lead.createdAt,
                 updatedAt: lead.updatedAt,
-                timeline: timeline // Add unified timeline
+                timeline: timeline
             };
         }));
 
