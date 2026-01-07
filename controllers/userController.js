@@ -43,7 +43,7 @@ exports.loginOrRegister = async (req, res, next) => {
             });
         }
 
-        let defaultRole = await Role.findOne({ name: 'User' }).lean();
+        let defaultRole = await Role.findOne({ name: { $regex: /^user$/i } }).lean();
         if (!defaultRole) {
             defaultRole = await Role.create({
                 name: 'User',
