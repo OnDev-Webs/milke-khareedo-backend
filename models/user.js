@@ -41,6 +41,10 @@ const userSchema = new mongoose.Schema({
         default: '+91',
         trim: true
     },
+    isActive: {
+        type: Boolean,
+        default: true
+    },
     // Profile fields (can be updated later)
     pincode: {
         type: String,
