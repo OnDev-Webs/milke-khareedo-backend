@@ -166,20 +166,20 @@ const checkPermission = async (req, res, next, resource, action) => {
 };
 
 // Blog Permission Middlewares
-const authorizeBlogAdd = async (req, res, next) => {
-    return checkPermission(req, res, next, 'blog', 'add');
+const authorizeBlogAdd = (req, res, next) => {
+  return checkPermission(req, res, next, 'blogs', 'add');
 };
 
-const authorizeBlogEdit = async (req, res, next) => {
-    return checkPermission(req, res, next, 'blog', 'edit');
+const authorizeBlogEdit = (req, res, next) => {
+  return checkPermission(req, res, next, 'blogs', 'edit');
 };
 
-const authorizeBlogView = async (req, res, next) => {
-    return checkPermission(req, res, next, 'blog', 'view');
+const authorizeBlogView = (req, res, next) => {
+  return checkPermission(req, res, next, 'blogs', 'view');
 };
 
-const authorizeBlogDelete = async (req, res, next) => {
-    return checkPermission(req, res, next, 'blog', 'delete');
+const authorizeBlogDelete = (req, res, next) => {
+  return checkPermission(req, res, next, 'blogs', 'delete');
 };
 
 module.exports = {

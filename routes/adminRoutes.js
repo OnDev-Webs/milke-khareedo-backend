@@ -107,11 +107,11 @@ router.put('/update_role/:id', authenticate, authorizeSuperAdmin, adminControlle
 router.delete('/delete_role/:id', authenticate, authorizeSuperAdmin, adminController.deleteRole);
 
 // ASSIGN NEW USER ROUTES
-router.post('/create_user', authenticate, authorizeSuperAdmin, adminController.createUser);
+router.post('/create_user', authenticate, adminController.createUser);
 router.get('/', authenticate, authorizeAdmin, adminController.getAllAssignUsers);
 router.get('/get_user/:id', authenticate, authorizeAdmin, adminController.getAssignUserById);
-router.put('/update_user/:id', authenticate, authorizeSuperAdmin,upload.single('profileImage'), adminController.updateAssignUser);
-router.delete('/delete_user/:id', authenticate, authorizeSuperAdmin, adminController.deleteAssignUser);
+router.put('/update_user/:id', authenticate, upload.single('profileImage'), adminController.updateAssignUser);
+router.delete('/delete_user/:id', authenticate, adminController.deleteAssignUser);
 
 // BLOG MANAGEMENT ROUTES (with permission checks)
 router.post('/blog', authenticate, upload.fields([
