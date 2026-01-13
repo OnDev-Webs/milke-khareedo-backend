@@ -114,6 +114,10 @@ router.put('/update_user/:id', authenticate, upload.single('profileImage'), admi
 router.delete('/delete_user/:id', authenticate, adminController.deleteAssignUser);
 
 // BLOG MANAGEMENT ROUTES (with permission checks)
+router.post('/categories', authenticate, authorizeAdmin, adminController.createCategory);
+router.get('/categories', authenticate, authorizeAdmin, adminController.getCategories);
+router.put('/categories/:id', authenticate, authorizeAdmin, adminController.updateCategory);
+
 router.post('/blog', authenticate, upload.fields([
     { name: 'bannerImage', maxCount: 1 }
 ]), authorizeBlogAdd, adminController.createBlog);

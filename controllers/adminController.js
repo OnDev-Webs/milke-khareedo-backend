@@ -10,6 +10,7 @@ const leadModal = require("../models/leadModal");
 const LeadActivity = require("../models/leadActivity");
 const Notification = require("../models/notification");
 const Blog = require("../models/blog");
+const Category = require("../models/category");
 const { uploadToS3, uploadBufferToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
 const { sendPasswordSMS } = require("../utils/twilio");
@@ -4691,6 +4692,191 @@ exports.updateCRMProfile = async (req, res, next) => {
 
 // ===================== BLOG MANAGEMENT SECTION =====================
 
+// ===================== CATEGORY MANAGEMENT SECTION =====================
+const normalizeCategoryName = (name) => name?.toString().trim();
+
+const findOrCreateCategory = async ({ categoryId, categoryName, userId }) => {
+    let resolvedCategory = null;
+
+    if (categoryId && mongoose.Types.ObjectId.isValid(categoryId)) {
+        resolvedCategory = await Category.findById(categoryId);
+    }
+
+    const normalizedName = normalizeCategoryName(categoryName);
+    if (!resolvedCategory && normalizedName) {
+        resolvedCategory = await Category.findOne({ nameLower: normalizedName.toLowerCase() });
+    }
+
+    if (!resolvedCategory && normalizedName) {
+        resolvedCategory = await Category.create({
+            name: normalizedName,
+            userId,
+            isActive: true
+        });
+    }
+
+    if (!resolvedCategory) {
+        const error = new Error('Category not found');
+        error.statusCode = 404;
+        throw error;
+    }
+
+    return resolvedCategory;
+};
+
+// @desc    Create a category manually (admin)
+// @route   POST /api/admin/categories
+// @access  Private (Admin)
+exports.createCategory = async (req, res, next) => {
+    try {
+        const { name, isActive = true } = req.body;
+        const normalizedName = normalizeCategoryName(name);
+
+        if (!normalizedName) {
+            return res.status(400).json({
+                success: false,
+                message: 'Category name is required'
+            });
+        }
+
+        const existingCategory = await Category.findOne({ nameLower: normalizedName.toLowerCase() });
+        if (existingCategory) {
+            return res.status(400).json({
+                success: false,
+                message: 'Category already exists'
+            });
+        }
+
+        const category = await Category.create({
+            name: normalizedName,
+            userId: req.user.userId,
+            isActive: isActive === 'false' ? false : !!isActive
+        });
+
+        logInfo('Category created', { categoryId: category._id, name: category.name });
+
+        res.status(201).json({
+            success: true,
+            message: 'Category created successfully',
+            data: category
+        });
+    } catch (error) {
+        logError('Error creating category', error, { userId: req.user?.userId });
+        next(error);
+    }
+};
+
+// @desc    Get categories with pagination/search
+// @route   GET /api/admin/categories
+// @access  Private (Admin)
+exports.getCategories = async (req, res, next) => {
+    try {
+        const { page = 1, limit = 20, search, isActive } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const filter = {};
+        if (search) {
+            filter.name = { $regex: search, $options: 'i' };
+        }
+        if (isActive !== undefined) {
+            filter.isActive = isActive === 'true' || isActive === true;
+        }
+
+        const total = await Category.countDocuments(filter);
+        const categories = await Category.find(filter)
+            .sort({ nameLower: 1 })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .lean();
+
+        res.json({
+            success: true,
+            message: 'Categories fetched successfully',
+            data: categories,
+            pagination: {
+                total,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                totalPages: Math.ceil(total / parseInt(limit))
+            }
+        });
+    } catch (error) {
+        logError('Error fetching categories', error);
+        next(error);
+    }
+};
+
+// @desc    Update category name or status
+// @route   PUT /api/admin/categories/:id
+// @access  Private (Admin)
+exports.updateCategory = async (req, res, next) => {
+    try {
+        const { id } = req.params;
+        const { name, isActive } = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid category id'
+            });
+        }
+
+        const updates = {};
+        if (name !== undefined) {
+            const normalizedName = normalizeCategoryName(name);
+            if (!normalizedName) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Category name cannot be empty'
+                });
+            }
+
+            const duplicate = await Category.findOne({
+                nameLower: normalizedName.toLowerCase(),
+                _id: { $ne: id }
+            });
+
+            if (duplicate) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Another category with this name already exists'
+                });
+            }
+
+            updates.name = normalizedName;
+            updates.nameLower = normalizedName.toLowerCase();
+        }
+
+        if (isActive !== undefined) {
+            updates.isActive = isActive === 'true' || isActive === true;
+        }
+
+        const category = await Category.findByIdAndUpdate(
+            id,
+            updates,
+            { new: true, runValidators: true }
+        );
+
+        if (!category) {
+            return res.status(404).json({
+                success: false,
+                message: 'Category not found'
+            });
+        }
+
+        logInfo('Category updated', { categoryId: id, updates: Object.keys(updates) });
+
+        res.json({
+            success: true,
+            message: 'Category updated successfully',
+            data: category
+        });
+    } catch (error) {
+        logError('Error updating category', error, { categoryId: req.params?.id });
+        next(error);
+    }
+};
+
 // ===================== CREATE BLOG =====================
 // @desc    Create a new blog post
 // @route   POST /api/admin/blog
@@ -4701,7 +4887,10 @@ exports.createBlog = async (req, res, next) => {
             title,
             tags,
             content,
-            isPublished
+            isPublished,
+            categoryId,
+            categoryName,
+            category
         } = req.body;
 
         const author = req.user.userId;
@@ -4713,6 +4902,20 @@ exports.createBlog = async (req, res, next) => {
                 message: 'Title and content are required'
             });
         }
+
+        const providedCategory = categoryId || categoryName || category;
+        if (!providedCategory) {
+            return res.status(400).json({
+                success: false,
+                message: 'Category is required for the blog'
+            });
+        }
+
+        const resolvedCategory = await findOrCreateCategory({
+            categoryId: categoryId || category,
+            categoryName: categoryName || category,
+            userId: author
+        });
 
         let tagsArray = [];
         if (tags) {
@@ -4761,7 +4964,8 @@ exports.createBlog = async (req, res, next) => {
             bannerImage: bannerImageUrl,
             content,
             slug: finalSlug,
-            isPublished: isPublished === 'true' || isPublished === true
+            isPublished: isPublished === 'true' || isPublished === true,
+            category: resolvedCategory._id
         });
 
         logInfo('Blog created successfully', {
@@ -4774,7 +4978,12 @@ exports.createBlog = async (req, res, next) => {
             success: true,
             message: 'Blog created successfully',
             data: {
-                blog
+                blog,
+                category: {
+                    id: resolvedCategory._id,
+                    name: resolvedCategory.name,
+                    isActive: resolvedCategory.isActive
+                }
             }
         });
 
@@ -4790,7 +4999,7 @@ exports.createBlog = async (req, res, next) => {
 // @access  Private (Admin)
 exports.getAllBlogs = async (req, res, next) => {
     try {
-        const { search, page = 1, limit = 10 } = req.query;
+        const { search, page = 1, limit = 10, categoryId, categoryName, sortBy } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
         const filter = { isStatus: true };
@@ -4803,14 +5012,54 @@ exports.getAllBlogs = async (req, res, next) => {
             ];
         }
 
-        const total = await Blog.countDocuments(filter);
+        if (categoryId && mongoose.Types.ObjectId.isValid(categoryId)) {
+            filter.category = categoryId;
+        } else if (categoryName) {
+            const categoryDoc = await Category.findOne({
+                nameLower: categoryName.toLowerCase()
+            }).select('_id');
+            if (categoryDoc) {
+                filter.category = categoryDoc._id;
+            } else {
+                // No matching category, return empty set early
+                return res.json({
+                    success: true,
+                    message: 'Blogs fetched successfully',
+                    data: [],
+                    pagination: {
+                        total: 0,
+                        page: parseInt(page),
+                        limit: parseInt(limit),
+                        totalPages: 0
+                    }
+                });
+            }
+        }
 
-        const blogs = await Blog.find(filter)
+        let blogs = [];
+        let total = 0;
+
+        const baseQuery = Blog.find(filter)
             .populate('author', 'name email profileImage')
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(parseInt(limit))
-            .lean();
+            .populate('category', 'name isActive');
+
+        if (sortBy === 'category') {
+            blogs = await baseQuery.sort({ createdAt: -1 }).lean();
+            blogs.sort((a, b) => {
+                const nameA = a.category?.name || '';
+                const nameB = b.category?.name || '';
+                return nameA.localeCompare(nameB);
+            });
+            total = blogs.length;
+            blogs = blogs.slice(skip, skip + parseInt(limit));
+        } else {
+            total = await Blog.countDocuments(filter);
+            blogs = await baseQuery
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(parseInt(limit))
+                .lean();
+        }
 
         const formattedBlogs = blogs.map(blog => ({
             _id: blog._id,
@@ -4826,9 +5075,22 @@ exports.getAllBlogs = async (req, res, next) => {
             }),
             isPublished: blog.isPublished,
             views: blog.views || 0,
+            category: blog.category ? {
+                id: blog.category._id,
+                name: blog.category.name,
+                isActive: blog.category.isActive
+            } : null,
             createdAt: blog.createdAt,
             updatedAt: blog.updatedAt
         }));
+
+        if (sortBy === 'category') {
+            formattedBlogs.sort((a, b) => {
+                const nameA = a.category?.name || '';
+                const nameB = b.category?.name || '';
+                return nameA.localeCompare(nameB);
+            });
+        }
 
         logInfo('Blogs fetched for admin', { total, page, limit });
 
@@ -4860,6 +5122,7 @@ exports.getBlogById = async (req, res, next) => {
 
         const blog = await Blog.findById(id)
             .populate('author', 'name email profileImage')
+            .populate('category', 'name isActive')
             .lean();
 
         if (!blog) {
@@ -4892,7 +5155,10 @@ exports.updateBlog = async (req, res, next) => {
             title,
             tags,
             content,
-            isPublished
+            isPublished,
+            categoryId,
+            categoryName,
+            category
         } = req.body;
 
         const existingBlog = await Blog.findById(id);
@@ -4919,6 +5185,15 @@ exports.updateBlog = async (req, res, next) => {
         if (content !== undefined) updates.content = content;
         if (isPublished !== undefined) {
             updates.isPublished = isPublished === 'true' || isPublished === true;
+        }
+
+        if (categoryId !== undefined || categoryName !== undefined || category !== undefined) {
+            const resolvedCategory = await findOrCreateCategory({
+                categoryId: categoryId || category,
+                categoryName: categoryName || category,
+                userId: req.user.userId
+            });
+            updates.category = resolvedCategory._id;
         }
 
         if (tags !== undefined) {
@@ -4955,6 +5230,7 @@ exports.updateBlog = async (req, res, next) => {
             { new: true, runValidators: true }
         )
             .populate('author', 'name email profileImage')
+            .populate('category', 'name isActive')
             .lean();
 
         logInfo('Blog updated successfully', {

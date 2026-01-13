@@ -36,6 +36,7 @@ router.post('/contact-us', optionalAuthenticate, homePageController.contactUs);
 
 // BLOG ROUTES
 router.get('/blogs', homePageController.getAllBlogs);
+router.get('/blog-categories', homePageController.getBlogCategories);
 router.get('/blog/:idOrSlug', homePageController.getBlogById);
 
 module.exports = router;
