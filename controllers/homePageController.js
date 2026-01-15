@@ -1596,6 +1596,15 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                 const simMaxPrice = simPrices.length > 0 ? Math.max(...simPrices) : 0;
                 const simUnitTypes = [...new Set(prop.configurations.map(config => config.unitType).filter(Boolean))];
                 const simImages = formatPropertyImages(prop.images);
+                let lastDayToJoin = null;
+                if (prop.possessionDate) {
+                    const d = new Date(prop.possessionDate);
+                    lastDayToJoin = d.toLocaleDateString("en-IN", {
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric",
+                    });
+                }
                 let openingDate = null;
                 if (prop.possessionDate) {
                     const date = new Date(prop.possessionDate);
@@ -1611,6 +1620,7 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                     projectName: prop.projectName,
                     images: simImages, // Array of all images (cover first, then by order)
                     imageUrl: simImages.length > 0 ? simImages[0] : null, // Keep for backward compatibility
+                    lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
                     status: prop.possessionStatus === 'Under Construction'
                         ? (openingDate ? `Opening ${openingDate}` : 'Opening soon')
                         : 'Available',
