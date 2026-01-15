@@ -6,6 +6,7 @@ const Developer = require('../models/developer');
 const LeadActivity = require('../models/leadActivity');
 const Notification = require('../models/notification');
 const Blog = require('../models/blog');
+const Category = require('../models/category');
 const User = require('../models/user');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
@@ -2206,6 +2207,8 @@ exports.getAllBlogs = async (req, res, next) => {
         const {
             page = 1,
             limit = 10,
+            categoryId,
+            categoryName,
             category,
             tag,
             search,
@@ -2214,13 +2217,60 @@ exports.getAllBlogs = async (req, res, next) => {
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        const filter = {
-            isStatus: true,
-            isPublished: true
-        };
+        const filter = { isStatus: true, isPublished: true };
 
-        if (category) {
-            filter.category = { $regex: category, $options: 'i' };
+        // Ensure we only show blogs under active categories
+        const activeCategoryIds = await Category.find({ isActive: true })
+            .select('_id')
+            .lean();
+        const activeCategoryIdList = activeCategoryIds.map(cat => cat._id);
+        if (activeCategoryIdList.length === 0) {
+            return res.json({
+                success: true,
+                message: 'Blogs fetched successfully',
+                data: [],
+                pagination: {
+                    total: 0,
+                    page: parseInt(page),
+                    limit: parseInt(limit),
+                    totalPages: 0,
+                    hasMore: false
+                }
+            });
+        }
+        filter.category = { $in: activeCategoryIdList };
+
+        const providedCategory = categoryId || categoryName || category;
+        if (providedCategory) {
+            let resolvedCategory = null;
+            if (mongoose.Types.ObjectId.isValid(providedCategory)) {
+                resolvedCategory = await Category.findOne({
+                    _id: providedCategory,
+                    isActive: true
+                }).select('_id');
+            } else {
+                resolvedCategory = await Category.findOne({
+                    nameLower: providedCategory.toLowerCase(),
+                    isActive: true
+                }).select('_id');
+            }
+
+            if (!resolvedCategory) {
+                return res.json({
+                    success: true,
+                    message: 'Blogs fetched successfully',
+                    data: [],
+                    pagination: {
+                        total: 0,
+                        page: parseInt(page),
+                        limit: parseInt(limit),
+                        totalPages: 0,
+                        hasMore: false
+                    }
+                });
+            }
+
+            filter.category = resolvedCategory._id;
         }
 
         if (tag) {
@@ -2228,13 +2278,22 @@ exports.getAllBlogs = async (req, res, next) => {
         }
 
         if (search) {
+            const matchedCategories = await Category.find({
+                name: { $regex: search, $options: 'i' },
+                isActive: true
+            }).select('_id').lean();
+            const categoryMatches = matchedCategories.map(c => c._id);
+
             filter.$or = [
                 { title: { $regex: search, $options: 'i' } },
                 { subtitle: { $regex: search, $options: 'i' } },
                 { content: { $regex: search, $options: 'i' } },
-                { category: { $regex: search, $options: 'i' } },
                 { tags: { $in: [new RegExp(search, 'i')] } }
             ];
+
+            if (categoryMatches.length > 0) {
+                filter.$or.push({ category: { $in: categoryMatches } });
+            }
         }
 
         let sortCriteria = {};
@@ -2248,15 +2307,35 @@ exports.getAllBlogs = async (req, res, next) => {
             sortCriteria = { createdAt: -1 };
         }
 
-        const total = await Blog.countDocuments(filter);
+        let blogs = [];
+        let total = 0;
 
-        const blogs = await Blog.find(filter)
+        const baseQuery = Blog.find(filter)
             .populate('author', 'name profileImage')
-            .select('title subtitle category author authorName tags bannerImage slug views createdAt content')
-            .sort(sortCriteria)
-            .skip(skip)
-            .limit(parseInt(limit))
-            .lean();
+            .populate({
+                path: 'category',
+                select: 'name isActive'
+            })
+            .select('title subtitle category author authorName tags bannerImage slug views createdAt content');
+
+        if (sortBy === 'category') {
+            blogs = await baseQuery.sort({ createdAt: -1 }).lean();
+            blogs = blogs.filter(blog => blog.category); // ensure active category present
+            blogs.sort((a, b) => {
+                const nameA = a.category?.name || '';
+                const nameB = b.category?.name || '';
+                return nameA.localeCompare(nameB);
+            });
+            total = blogs.length;
+            blogs = blogs.slice(skip, skip + parseInt(limit));
+        } else {
+            total = await Blog.countDocuments(filter);
+            blogs = await baseQuery
+                .sort(sortCriteria)
+                .skip(skip)
+                .limit(parseInt(limit))
+                .lean();
+        }
 
         const formattedBlogs = blogs.map(blog => {
             const date = new Date(blog.createdAt);
@@ -2277,9 +2356,21 @@ exports.getAllBlogs = async (req, res, next) => {
                 content: blog.content || '',
                 date: formattedDate,
                 views: blog.views || 0,
+                category: blog.category ? {
+                    id: blog.category._id,
+                    name: blog.category.name
+                } : null,
                 createdAt: blog.createdAt
             };
         });
+
+        if (sortBy === 'category') {
+            formattedBlogs.sort((a, b) => {
+                const nameA = a.category?.name || '';
+                const nameB = b.category?.name || '';
+                return nameA.localeCompare(nameB);
+            });
+        }
 
         logInfo('Blogs fetched for homepage', { total, page, limit, category, tag });
 
@@ -2298,6 +2389,57 @@ exports.getAllBlogs = async (req, res, next) => {
 
     } catch (error) {
         logError('Error fetching blogs for homepage', error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+// ===================== GET ACTIVE BLOG CATEGORIES (Homepage) =====================
+// @desc    Get all active blog categories for filters
+// @route   GET /api/home/blog-categories
+// @access  Public
+exports.getBlogCategories = async (req, res, next) => {
+    try {
+        const { includeCounts = 'false' } = req.query;
+
+        let countsMap = new Map();
+        if (includeCounts === 'true') {
+            const counts = await Blog.aggregate([
+                {
+                    $match: {
+                        isStatus: true,
+                        isPublished: true,
+                        category: { $exists: true, $ne: null }
+                    }
+                },
+                {
+                    $group: {
+                        _id: '$category',
+                        count: { $sum: 1 }
+                    }
+                }
+            ]);
+            countsMap = new Map(counts.map(item => [item._id.toString(), item.count]));
+        }
+
+        const categories = await Category.find({ isActive: true })
+            .sort({ nameLower: 1 })
+            .select('name isActive')
+            .lean();
+
+        const data = categories.map(cat => ({
+            id: cat._id,
+            name: cat.name,
+            isActive: cat.isActive,
+            blogCount: countsMap.get(cat._id.toString()) || 0
+        }));
+
+        res.json({
+            success: true,
+            message: 'Categories fetched successfully',
+            data
+        });
+    } catch (error) {
+        logError('Error fetching blog categories', error);
         res.status(500).json({ success: false, message: error.message });
     }
 };
@@ -2324,12 +2466,23 @@ exports.getBlogById = async (req, res, next) => {
 
         const blog = await Blog.findOne(filter)
             .populate('author', 'name email profileImage')
+            .populate({
+                path: 'category',
+                select: 'name isActive'
+            })
             .lean();
 
         if (!blog) {
             return res.status(404).json({
                 success: false,
                 message: 'Blog not found'
+            });
+        }
+
+        if (!blog.category || blog.category.isActive === false) {
+            return res.status(404).json({
+                success: false,
+                message: 'Blog category is inactive'
             });
         }
 
@@ -2346,7 +2499,10 @@ exports.getBlogById = async (req, res, next) => {
             _id: blog._id,
             title: blog.title,
             subtitle: blog.subtitle || '',
-            category: blog.category || '',
+            category: blog.category ? {
+                id: blog.category._id,
+                name: blog.category.name
+            } : null,
             author: {
                 id: blog.author?._id || blog.author,
                 name: blog.authorName || blog.author?.name || 'Admin',

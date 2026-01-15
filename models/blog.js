@@ -27,6 +27,11 @@ const blogSchema = new mongoose.Schema({
         type: String,
         required: [true, 'Please provide blog content']
     },
+    category: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Category',
+        required: true
+    },
     slug: {
         type: String,
         unique: true,
@@ -68,6 +73,7 @@ blogSchema.index({ slug: 1 });
 blogSchema.index({ isPublished: 1, isStatus: 1 });
 blogSchema.index({ author: 1 });
 blogSchema.index({ createdAt: -1 });
+blogSchema.index({ category: 1 });
 
 module.exports = mongoose.model('Blog', blogSchema);
 
