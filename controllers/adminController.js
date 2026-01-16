@@ -1144,16 +1144,8 @@ exports.updateProperty = async (req, res, next) => {
         const updates = {};
 
         allowedFields.forEach((field) => {
-            const value = req.body[field];
-
-            if (
-                value !== undefined &&
-                value !== null &&
-                value !== "" &&
-                value !== "[]" &&
-                value !== "{}"
-            ) {
-                updates[field] = value;
+            if (req.body[field] !== undefined) {
+                updates[field] = req.body[field];
             }
         });
 
@@ -1220,8 +1212,15 @@ exports.updateProperty = async (req, res, next) => {
             }
         }
 
+        if (!updates.developer) {
+            const existing = await Property.findById(req.params.id)
+                .select("developer")
+                .lean();
+            updates.developer = existing?.developer;
+        }
+
         if (req.body.developer) {
-            updates.developer = safeJSON(req.body.developer, null);
+            updates.developer = req.body.developer; 
         }
 
         if (req.body.isStatus !== undefined) {
@@ -1268,7 +1267,7 @@ exports.updateProperty = async (req, res, next) => {
 
         const property = await Property.findByIdAndUpdate(
             req.params.id,
-            updates,
+            { $set: updates },
             { new: true, runValidators: true }
         );
 
