@@ -1220,7 +1220,7 @@ exports.updateProperty = async (req, res, next) => {
         }
 
         if (req.body.developer) {
-            updates.developer = req.body.developer; 
+            updates.developer = req.body.developer;
         }
 
         if (req.body.isStatus !== undefined) {
@@ -1309,6 +1309,7 @@ exports.deleteProperty = async (req, res, next) => {
 exports.createDeveloper = async (req, res, next) => {
     try {
         let logo = null;
+
         if (req.file) {
             logo = await uploadToS3(req.file);
         } else if (req.body.logo) {
@@ -1322,40 +1323,55 @@ exports.createDeveloper = async (req, res, next) => {
             establishedYear,
             website,
             totalProjects,
-            sourcingManager
+            sourcingManager,
         } = req.body;
 
         let parsedSourcingManager = sourcingManager;
-        if (typeof sourcingManager === 'string') {
+        if (typeof sourcingManager === "string") {
             try {
                 parsedSourcingManager = JSON.parse(sourcingManager);
             } catch (err) {
-                return res.status(400).json({ success: false, message: "Invalid sourcingManager JSON" });
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid sourcingManager JSON",
+                });
             }
         }
 
-        if (!logo || !developerName || !city || !parsedSourcingManager?.name || !parsedSourcingManager?.mobile) {
+        if (
+            !developerName ||
+            !city ||
+            !establishedYear ||
+            !totalProjects ||
+            !parsedSourcingManager?.name ||
+            !parsedSourcingManager?.mobile ||
+            !parsedSourcingManager?.email
+        ) {
             return res.status(400).json({
                 success: false,
-                message: "All required fields are mandatory"
+                message: "Please fill all required fields",
             });
         }
 
         const developer = await Developer.create({
             logo,
             developerName,
-            description,
+            description: description || "",
             city,
             establishedYear,
-            website,
+            website: website || "",
             totalProjects,
-            sourcingManager: parsedSourcingManager
+            sourcingManager: {
+                name: parsedSourcingManager.name,
+                mobile: parsedSourcingManager.mobile,
+                email: parsedSourcingManager.email,
+            },
         });
 
         res.status(201).json({
             success: true,
             message: "Developer created successfully",
-            data: developer
+            data: developer,
         });
     } catch (error) {
         next(error);
