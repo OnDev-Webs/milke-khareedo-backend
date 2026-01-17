@@ -3,7 +3,8 @@ const mongoose = require("mongoose");
 const DeveloperSchema = new mongoose.Schema({
     logo: {
         type: String,
-        required: true
+        required: false,
+        default: "",
     },
     developerName: {
         type: String,
@@ -11,14 +12,16 @@ const DeveloperSchema = new mongoose.Schema({
         trim: true
     },
     description: {
-        type: String
+        type: String,
+        default: "",
     },
     city: {
         type: String,
         required: true
     },
     establishedYear: {
-        type: Number
+        type: Number,
+        required: true,
     },
     totalProjects: {
         type: Number,
@@ -39,6 +42,7 @@ const DeveloperSchema = new mongoose.Schema({
         },
         email: {
             type: String,
+            required: true,
             lowercase: true
         }
     }
