@@ -614,7 +614,14 @@ exports.searchProperties = async (req, res, next) => {
                 const dateB = b.createdAt ? new Date(b.createdAt) : new Date(0);
                 return dateB - dateA;
             });
-        } else if (sortBy === 'priceLow') {
+        } else if (sortBy === 'oldest') {
+            allProperties.sort((a, b) => {
+                const dateA = a.createdAt ? new Date(a.createdAt) : new Date(0);
+                const dateB = b.createdAt ? new Date(b.createdAt) : new Date(0);
+                return dateA - dateB;
+            });
+        }
+        else if (sortBy === 'priceLow') {
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
