@@ -3182,32 +3182,37 @@ exports.getAllProperties = async (req, res, next) => {
 
 exports.getBlogComments = async (req, res) => {
     try {
-        const { blogId } = req.params;
-
-        const comments = await Comment.find({ blog: blogId, parentComment: null, })
-            .populate("author", "name profileImage")
-            .populate({
-                path: "replies",
-                options: { sort: { createdAt: 1 } },
-                populate: {
-                    path: "author",
-                    select: "name profileImage",
-                },
-            })
-            .lean();
-
-        res.status(200).json({
-            success: true,
-            data: comments,
-        });
+      const { blogId } = req.params;
+  
+      const comments = await Comment.find({
+        blog: blogId,
+        parentComment: null,
+      })
+        .populate("author", "name profileImage email")
+        .populate("likedBy", "name email")
+        .populate({
+          path: "replies",
+          options: { sort: { createdAt: 1 } },
+          populate: [
+            { path: "author", select: "name profileImage email" },
+            { path: "likedBy", select: "name email" },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .lean();
+  
+      res.status(200).json({
+        success: true,
+        data: comments,
+      });
     } catch (error) {
-        console.error("getBlogComments ERROR", error);
-        res.status(500).json({
-            success: false,
-            message: "Failed to fetch comments",
-        });
+      console.error("getBlogComments ERROR", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch comments",
+      });
     }
-};
+  };
 
 exports.addBlogComment = async (req, res) => {
     try {
