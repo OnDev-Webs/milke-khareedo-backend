@@ -15,6 +15,8 @@ const { uploadToS3, uploadBufferToS3 } = require("../utils/s3");
 const { logInfo, logError } = require('../utils/logger');
 const { sendPasswordSMS } = require("../utils/twilio");
 const { Parser } = require("json2csv");
+const Comment = require('../models/comment');
+
 
 // AUTH SECTION
 
@@ -5296,3 +5298,38 @@ exports.deleteBlog = async (req, res, next) => {
         res.status(500).json({ success: false, message: error.message });
     }
 };
+
+exports.getBlogComments = async (req, res) => {
+    try {
+      const { blogId } = req.params;
+  
+      const comments = await Comment.find({
+        blog: blogId,
+        parentComment: null,
+      })
+        .populate("author", "name profileImage email")
+        .populate("likedBy", "name email")
+        .populate({
+          path: "replies",
+          options: { sort: { createdAt: 1 } },
+          populate: [
+            { path: "author", select: "name profileImage email" },
+            { path: "likedBy", select: "name email" },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .lean();
+  
+      res.status(200).json({
+        success: true,
+        data: comments,
+      });
+    } catch (error) {
+      console.error("getBlogComments ERROR", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch comments",
+      });
+    }
+  };
+  

@@ -3,7 +3,7 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const validate = require('../middleware/validator');
 const { body } = require('express-validator');
-const { authenticate, authorizeAdmin, authorizeSuperAdmin, authorizeBlogAdd, authorizeBlogEdit, authorizeBlogView, authorizeBlogDelete } = require('../middleware/auth');
+const { authenticate, authorizeAdmin, authorizeSuperAdmin, authorizeBlogAdd, authorizeBlogEdit, authorizeBlogView, authorizeBlogDelete, optionalAuthenticate } = require('../middleware/auth');
 const upload = require('../utils/multer');
 
 // AUTH ROUTES
@@ -130,6 +130,8 @@ router.put('/blog/:id', authenticate, upload.fields([
     { name: 'bannerImage', maxCount: 1 }
 ]), authorizeBlogEdit, adminController.updateBlog);
 router.delete('/blog/:id', authenticate, authorizeBlogDelete, adminController.deleteBlog);
+
+router.get("/blog/:blogId/comments",optionalAuthenticate,adminController.getBlogComments);
 
 module.exports = router;
 

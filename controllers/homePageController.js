@@ -11,6 +11,8 @@ const User = require('../models/user');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const { logInfo, logError } = require('../utils/logger');
+const Comment = require('../models/comment');
+
 
 // Helper function to convert connectivity Map to object for JSON response
 const convertConnectivityToObject = (connectivity) => {
@@ -614,7 +616,14 @@ exports.searchProperties = async (req, res, next) => {
                 const dateB = b.createdAt ? new Date(b.createdAt) : new Date(0);
                 return dateB - dateA;
             });
-        } else if (sortBy === 'priceLow') {
+        } else if (sortBy === 'oldest') {
+            allProperties.sort((a, b) => {
+                const dateA = a.createdAt ? new Date(a.createdAt) : new Date(0);
+                const dateB = b.createdAt ? new Date(b.createdAt) : new Date(0);
+                return dateA - dateB;
+            });
+        }
+        else if (sortBy === 'priceLow') {
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -3170,3 +3179,128 @@ exports.getAllProperties = async (req, res, next) => {
         next(error);
     }
 };
+
+exports.getBlogComments = async (req, res) => {
+    try {
+      const { blogId } = req.params;
+  
+      const comments = await Comment.find({
+        blog: blogId,
+        parentComment: null,
+      })
+        .populate("author", "name profileImage email")
+        .populate("likedBy", "name email")
+        .populate({
+          path: "replies",
+          options: { sort: { createdAt: 1 } },
+          populate: [
+            { path: "author", select: "name profileImage email" },
+            { path: "likedBy", select: "name email" },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .lean();
+  
+      res.status(200).json({
+        success: true,
+        data: comments,
+      });
+    } catch (error) {
+      console.error("getBlogComments ERROR", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch comments",
+      });
+    }
+  };
+
+exports.addBlogComment = async (req, res) => {
+    try {
+        const { blogId } = req.params;
+        const { content, parentComment } = req.body;
+
+        if (!req.user || !req.user.userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
+        if (!content || !content.trim()) {
+            return res.status(400).json({
+                success: false,
+                message: "Comment content is required",
+            });
+        }
+
+        const comment = await Comment.create({
+            blog: blogId,
+            author: req.user.userId,
+            content: content.trim(),
+            parentComment: parentComment || null,
+        });
+
+        const populatedComment = await Comment.findById(comment._id).populate("author", "name profileImage");
+
+        return res.status(201).json({
+            success: true,
+            data: populatedComment,
+        });
+    } catch (error) {
+        console.error("addBlogComment ERROR", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to post comment",
+        });
+    }
+};
+
+exports.toggleCommentLike = async (req, res) => {
+    try {
+        const { commentId } = req.params;
+
+        if (!req.user || !req.user.userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized",
+            });
+        }
+
+        const userId = req.user.userId;
+        const comment = await Comment.findById(commentId);
+
+        if (!comment) {
+            return res.status(404).json({
+                success: false,
+                message: "Comment not found",
+            });
+        }
+
+        const alreadyLiked = comment.likedBy.some((id) => id.toString() === userId);
+
+        if (alreadyLiked) {
+            comment.likedBy = comment.likedBy.filter((id) => id.toString() !== userId);
+        } else {
+            comment.likedBy.push(userId);
+        }
+
+        await comment.save();
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                liked: !alreadyLiked,
+                likedBy: comment.likedBy,          
+                totalLikes: comment.likedBy.length 
+            }
+        });
+
+    } catch (error) {
+        console.error("toggleCommentLike ERROR", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to toggle like",
+        });
+    }
+};
+
