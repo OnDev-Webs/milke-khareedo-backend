@@ -131,7 +131,5 @@ router.put('/blog/:id', authenticate, upload.fields([
 ]), authorizeBlogEdit, adminController.updateBlog);
 router.delete('/blog/:id', authenticate, authorizeBlogDelete, adminController.deleteBlog);
 
-router.get("/blog/:blogId/comments",optionalAuthenticate,adminController.getBlogComments);
-
 module.exports = router;
 
