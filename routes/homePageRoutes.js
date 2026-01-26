@@ -39,9 +39,5 @@ router.get('/blogs', homePageController.getAllBlogs);
 router.get('/blog-categories', homePageController.getBlogCategories);
 router.get('/blog/:idOrSlug', homePageController.getBlogById);
 
-// ---------------- BLOG COMMENTS ----------------
-router.get("/blog/:blogId/comments",optionalAuthenticate,homePageController.getBlogComments);
-router.post("/blog/:blogId/comments", authenticate, homePageController.addBlogComment);
-router.post("/blog/comments/:commentId/like", authenticate, homePageController.toggleCommentLike);
 
 module.exports = router;
