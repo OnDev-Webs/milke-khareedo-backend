@@ -21,7 +21,6 @@ const userSchema = new mongoose.Schema({
     },
     email: {
         type: String,
-        unique: true,
         lowercase: true,
         trim: true,
         match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email']
@@ -81,6 +80,16 @@ const userSchema = new mongoose.Schema({
     timestamps: true
 });
 
+// Ensure email is unique only when it is actually set (non-null string).
+// This avoids "duplicate key" errors when multiple users have no email.
+userSchema.index(
+    { email: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { email: { $type: 'string' } }
+    }
+);
+
 // Hash password before saving
 userSchema.pre('save', async function (next) {
     if (!this.isModified('password')) return next();
@@ -96,5 +105,4 @@ userSchema.pre('save', function (next) {
     }
     next();
 });
-
 module.exports = mongoose.model('User', userSchema);
