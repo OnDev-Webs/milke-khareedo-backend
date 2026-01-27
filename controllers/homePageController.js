@@ -315,16 +315,6 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
             const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
 
-            const unitTypes = [];
-            if (property.configurations && Array.isArray(property.configurations)) {
-                property.configurations.forEach(config => {
-                    if (config.unitType) {
-                        unitTypes.push(config.unitType);
-                    }
-                });
-            }
-            const uniqueUnitTypes = [...new Set(unitTypes)];
-
             const images = formatPropertyImages(property.images);
 
             let lastDayToJoin = null;
@@ -418,8 +408,7 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                 } : null,
                 offerPrice: offerPriceNum > 0 ? formatPrice(offerPriceNum) : null,
                 discountPercentage: property.discountPercentage || "00.00%",
-                configurations: uniqueUnitTypes,
-                configurationsFormatted: uniqueUnitTypes.join(', '),
+                configurations: property.configurations || [],
                 possessionStatus: property.possessionStatus || 'N/A',
                 developer: developerInfo?.developerName || 'N/A',
                 leadCount: leadCount,
@@ -468,6 +457,75 @@ exports.getTopVisitedProperties = async (req, res, next) => {
 // @desc    Search properties by city and search text with filters (price, BHK, property type, status)
 // @route   GET /api/home/search-properties
 // @access  Public
+
+const parseSearchText = (text = "") => {
+    const lower = text.toLowerCase();
+  
+    const bhkMatch = text.match(/(\d+(\.\d+)?)\s*bhk/i);
+    const sqftMatch = lower.match(/(\d+)\s*(sqft|sq\.ft|square feet)/);
+  
+    return {
+      bhk: bhkMatch ? bhkMatch[1] : null,
+      sqft: sqftMatch ? Number(sqftMatch[1]) : null,
+      text: lower
+        .replace(/(\d+(\.\d+)?)\s*bhk/i, '')
+        .replace(/(\d+)\s*(sqft|sq\.ft|square feet)/i, '')
+        .replace(/ready to move|ready|under construction/gi, '')
+        .trim()    
+    };
+};
+
+function parsePriceFromText(text) {
+    if (!text) return {};
+  
+    const lower = text.toLowerCase();
+  
+    const toNumber = (val, unit) => {
+      val = parseFloat(val);
+      if (unit.includes('cr')) return val * 10000000;
+      if (unit.includes('lakh') || unit.includes('lac')) return val * 100000;
+      return val;
+    };
+  
+    let minPrice = null;
+    let maxPrice = null;
+  
+    // under / below
+    let underMatch = lower.match(/(under|below)\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
+    if (underMatch) {
+      maxPrice = toNumber(underMatch[2], underMatch[4]);
+    }
+  
+    // above / over
+    let aboveMatch = lower.match(/(above|over)\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
+    if (aboveMatch) {
+      minPrice = toNumber(aboveMatch[2], aboveMatch[4]);
+    }
+  
+    // between X and Y
+    let betweenMatch = lower.match(
+      /between\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)\s*and\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/
+    );
+    if (betweenMatch) {
+      minPrice = toNumber(betweenMatch[1], betweenMatch[3]);
+      maxPrice = toNumber(betweenMatch[4], betweenMatch[6]);
+    }
+  
+    // min / max
+    let minMatch = lower.match(/min\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
+    if (minMatch) {
+      minPrice = toNumber(minMatch[1], minMatch[3]);
+    }
+  
+    let maxMatch = lower.match(/max\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
+    if (maxMatch) {
+      maxPrice = toNumber(maxMatch[1], maxMatch[3]);
+    }
+  
+    return { minPrice, maxPrice };
+}
+  
+
 exports.searchProperties = async (req, res, next) => {
     try {
         let {
@@ -488,51 +546,107 @@ exports.searchProperties = async (req, res, next) => {
         const skip = (page - 1) * limit;
 
         const propertyFilter = { isStatus: true };
-        const searchConditions = [];
+        const { bhk: parsedBhk, sqft, text } = parseSearchText(searchText);
 
-        if (city) {
-            propertyFilter.location = { $regex: city, $options: "i" };
+        const textSearchConditions = [];   
+        const configSearchConditions = []; 
+        let developerIds = [];
+        const andConditions = [];
+
+        const lowerText = text?.toLowerCase() || '';
+
+        if (lowerText.includes('under construction')) {
+            andConditions.push({
+                possessionStatus: { $regex: '^Under Construction$', $options: 'i' }
+            });
+        }
+        
+        if (
+            lowerText.includes('ready to move') ||
+            lowerText === 'ready'
+        ) {
+            andConditions.push({
+                possessionStatus: { $regex: '^Ready To Move$', $options: 'i' }
+            });
         }
 
-        if (searchText) {
-            const searchRegex = { $regex: searchText, $options: "i" };
-            searchConditions.push({ projectName: searchRegex });
-            searchConditions.push({ location: searchRegex });
+        const priceFromText = parsePriceFromText(searchText);
+
+        if (priceFromText.minPrice) {
+        priceMin = priceFromText.minPrice;
         }
 
-        let matchingDeveloperIds = [];
-        if (searchText) {
-            const matchingDevelopers = await Developer.find({
-                developerName: { $regex: searchText, $options: "i" }
+        if (priceFromText.maxPrice) {
+        priceMax = priceFromText.maxPrice;
+        }
+        
+        const hasSearchText = typeof text === 'string' && text.trim().length > 0 && !sqft && !parsedBhk;
+
+        if (hasSearchText) {
+            const regex = { $regex: text.trim(), $options: 'i' };
+        
+            const developers = await Developer.find({
+                developerName: regex
             }).select('_id').lean();
-            matchingDeveloperIds = matchingDevelopers.map(dev => dev._id);
-
-            if (matchingDeveloperIds.length > 0) {
-                searchConditions.push({ developer: { $in: matchingDeveloperIds } });
+        
+            const orConditions = [
+                { projectName: regex },
+                { locality: regex },
+                { location: regex },
+                { state: regex }
+            ];
+        
+            if (developers.length > 0) {
+                developerIds = developers.map(d => d._id); // 🔥 YAHI MISSING THA
+              
+                orConditions.push({
+                  developer: { $in: developerIds }
+                });
             }
+            andConditions.push({ $or: orConditions });
         }
 
-        if (searchConditions.length > 0) {
-            propertyFilter.$or = searchConditions;
-        }
-
-        if (bhk) {
-            propertyFilter["configurations"] = { $elemMatch: { unitType: { $regex: bhk, $options: "i" } } };
-        }
-
-        if (propertyType) {
-            const typeRegex = { $regex: propertyType, $options: "i" };
-            if (!propertyFilter.$or) propertyFilter.$or = [];
-            propertyFilter.$or.push({ projectName: typeRegex });
-            propertyFilter.$or.push({ "configurations.unitType": typeRegex });
-        }
-
-        if (projectStatus) {
-            if (projectStatus === 'Pre Launch') {
-                propertyFilter.possessionStatus = 'Under Construction';
-            } else {
-                propertyFilter.possessionStatus = projectStatus;
+        if (parsedBhk || sqft) {
+            const configMatch = {};
+          
+            if (parsedBhk) {
+                configMatch.unitType = {
+                    $regex: new RegExp(`${parsedBhk}\\s*BHK`, 'i')
+                };                
             }
+          
+            if (sqft) {
+                configMatch.subConfigurations = {
+                  $elemMatch: {
+                    carpetArea: {
+                      $gte: sqft - 50,
+                      $lte: sqft + 50
+                    }
+                  }
+                };
+            }
+              
+            configSearchConditions.push({
+              configurations: { $elemMatch: configMatch }
+            });
+        }
+          
+        if (textSearchConditions.length > 0) {
+            andConditions.push({ $or: textSearchConditions });
+        }
+
+        if (configSearchConditions.length > 0) {
+            andConditions.push(...configSearchConditions);
+        }         
+
+        if (developerIds.length > 0) {
+            andConditions.push({
+              developer: { $in: developerIds }
+            });
+        }  
+          
+        if (andConditions.length > 0) {
+            propertyFilter.$and = andConditions;
         }
 
         const propertiesWithLeads = await leadModal.aggregate([
@@ -577,11 +691,21 @@ exports.searchProperties = async (req, res, next) => {
 
         const parsePriceToNumber = (priceStr) => {
             if (!priceStr) return 0;
+            if (typeof priceStr === 'number') {
+                return priceStr;
+            }
+        
+            if (typeof priceStr !== 'string') {
+                return 0;
+            }
+        
             let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
             const priceStrLower = priceStr.toLowerCase();
-            if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+        
+            if (priceStrLower.includes('lakh') || priceStrLower.includes('lac') || priceStrLower.includes('l')) {
                 priceNum = priceNum * 100000;
-            } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+            } 
+            else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
                 priceNum = priceNum * 10000000;
             }
             return priceNum;
@@ -707,13 +831,13 @@ exports.searchProperties = async (req, res, next) => {
             activeLeadsCounts.map(item => [item._id.toString(), item.activeLeadsCount])
         );
 
-        const developerIds = [...new Set(paginatedProperties.map(item => {
+        const developerIdsForMapping = [...new Set(paginatedProperties.map(item => {
             const dev = item.developer;
             if (!dev) return null;
             return dev._id ? dev._id.toString() : dev.toString();
         }).filter(Boolean))];
-
-        const developers = await Developer.find({ _id: { $in: developerIds } })
+          
+        const developers = await Developer.find({ _id: { $in: developerIdsForMapping } })
             .select('_id developerName')
             .lean();
         const developerMap = new Map(developers.map(dev => [dev._id.toString(), dev]));
@@ -866,7 +990,6 @@ exports.searchProperties = async (req, res, next) => {
                     searchQuery: trimmedSearchQuery,
                     location: trimmedLocation,
                     projectName: trimmedProjectName,
-                    ...(matchingDeveloperIds.length > 0 ? { developer: { $in: matchingDeveloperIds } } : {})
                 }).lean();
 
                 if (existingSearch) {
@@ -881,7 +1004,6 @@ exports.searchProperties = async (req, res, next) => {
                         searchQuery: trimmedSearchQuery,
                         location: trimmedLocation,
                         projectName: trimmedProjectName,
-                        ...(matchingDeveloperIds.length > 0 ? { developer: matchingDeveloperIds[0] } : {})
                     });
                 }
 
@@ -926,7 +1048,9 @@ exports.searchProperties = async (req, res, next) => {
                 searchText: searchText || null,
                 priceMin: priceMin || null,
                 priceMax: priceMax || null,
-                bhk: bhk || null,
+                bhk: parsedBhk || bhk || null,
+                sqft: sqft || null,
+                developer: developerIds.length > 0 ? developerIds : null,
                 propertyType: propertyType || null,
                 projectStatus: projectStatus || null,
                 sortBy: sortBy || 'leadCount'
