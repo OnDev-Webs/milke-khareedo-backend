@@ -460,71 +460,71 @@ exports.getTopVisitedProperties = async (req, res, next) => {
 
 const parseSearchText = (text = "") => {
     const lower = text.toLowerCase();
-  
+
     const bhkMatch = text.match(/(\d+(\.\d+)?)\s*bhk/i);
     const sqftMatch = lower.match(/(\d+)\s*(sqft|sq\.ft|square feet)/);
-  
+
     return {
-      bhk: bhkMatch ? bhkMatch[1] : null,
-      sqft: sqftMatch ? Number(sqftMatch[1]) : null,
-      text: lower
-        .replace(/(\d+(\.\d+)?)\s*bhk/i, '')
-        .replace(/(\d+)\s*(sqft|sq\.ft|square feet)/i, '')
-        .replace(/ready to move|ready|under construction/gi, '')
-        .trim()    
+        bhk: bhkMatch ? bhkMatch[1] : null,
+        sqft: sqftMatch ? Number(sqftMatch[1]) : null,
+        text: lower
+            .replace(/(\d+(\.\d+)?)\s*bhk/i, '')
+            .replace(/(\d+)\s*(sqft|sq\.ft|square feet)/i, '')
+            .replace(/ready to move|ready|under construction/gi, '')
+            .trim()
     };
 };
 
 function parsePriceFromText(text) {
     if (!text) return {};
-  
+
     const lower = text.toLowerCase();
-  
+
     const toNumber = (val, unit) => {
-      val = parseFloat(val);
-      if (unit.includes('cr')) return val * 10000000;
-      if (unit.includes('lakh') || unit.includes('lac')) return val * 100000;
-      return val;
+        val = parseFloat(val);
+        if (unit.includes('cr')) return val * 10000000;
+        if (unit.includes('lakh') || unit.includes('lac')) return val * 100000;
+        return val;
     };
-  
+
     let minPrice = null;
     let maxPrice = null;
-  
+
     // under / below
     let underMatch = lower.match(/(under|below)\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
     if (underMatch) {
-      maxPrice = toNumber(underMatch[2], underMatch[4]);
+        maxPrice = toNumber(underMatch[2], underMatch[4]);
     }
-  
+
     // above / over
     let aboveMatch = lower.match(/(above|over)\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
     if (aboveMatch) {
-      minPrice = toNumber(aboveMatch[2], aboveMatch[4]);
+        minPrice = toNumber(aboveMatch[2], aboveMatch[4]);
     }
-  
+
     // between X and Y
     let betweenMatch = lower.match(
-      /between\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)\s*and\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/
+        /between\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)\s*and\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/
     );
     if (betweenMatch) {
-      minPrice = toNumber(betweenMatch[1], betweenMatch[3]);
-      maxPrice = toNumber(betweenMatch[4], betweenMatch[6]);
+        minPrice = toNumber(betweenMatch[1], betweenMatch[3]);
+        maxPrice = toNumber(betweenMatch[4], betweenMatch[6]);
     }
-  
+
     // min / max
     let minMatch = lower.match(/min\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
     if (minMatch) {
-      minPrice = toNumber(minMatch[1], minMatch[3]);
+        minPrice = toNumber(minMatch[1], minMatch[3]);
     }
-  
+
     let maxMatch = lower.match(/max\s*(\d+(\.\d+)?)\s*(lakh|lac|cr|crore)/);
     if (maxMatch) {
-      maxPrice = toNumber(maxMatch[1], maxMatch[3]);
+        maxPrice = toNumber(maxMatch[1], maxMatch[3]);
     }
-  
+
     return { minPrice, maxPrice };
 }
-  
+
 
 exports.searchProperties = async (req, res, next) => {
     try {
@@ -548,19 +548,24 @@ exports.searchProperties = async (req, res, next) => {
         const propertyFilter = { isStatus: true };
         const { bhk: parsedBhk, sqft, text } = parseSearchText(searchText);
 
-        const textSearchConditions = [];   
-        const configSearchConditions = []; 
+        const textSearchConditions = [];
+        const configSearchConditions = [];
         let developerIds = [];
         const andConditions = [];
 
         const lowerText = text?.toLowerCase() || '';
+
+        if (city && typeof city === 'string' && city.trim().length > 0) {
+            const trimmedCity = city.trim();
+            propertyFilter.location = { $regex: new RegExp(trimmedCity, 'i') };
+        }
 
         if (lowerText.includes('under construction')) {
             andConditions.push({
                 possessionStatus: { $regex: '^Under Construction$', $options: 'i' }
             });
         }
-        
+
         if (
             lowerText.includes('ready to move') ||
             lowerText === 'ready'
@@ -573,34 +578,34 @@ exports.searchProperties = async (req, res, next) => {
         const priceFromText = parsePriceFromText(searchText);
 
         if (priceFromText.minPrice) {
-        priceMin = priceFromText.minPrice;
+            priceMin = priceFromText.minPrice;
         }
 
         if (priceFromText.maxPrice) {
-        priceMax = priceFromText.maxPrice;
+            priceMax = priceFromText.maxPrice;
         }
-        
+
         const hasSearchText = typeof text === 'string' && text.trim().length > 0 && !sqft && !parsedBhk;
 
         if (hasSearchText) {
             const regex = { $regex: text.trim(), $options: 'i' };
-        
+
             const developers = await Developer.find({
                 developerName: regex
             }).select('_id').lean();
-        
+
             const orConditions = [
                 { projectName: regex },
                 { locality: regex },
                 { location: regex },
                 { state: regex }
             ];
-        
+
             if (developers.length > 0) {
                 developerIds = developers.map(d => d._id); // 🔥 YAHI MISSING THA
-              
+
                 orConditions.push({
-                  developer: { $in: developerIds }
+                    developer: { $in: developerIds }
                 });
             }
             andConditions.push({ $or: orConditions });
@@ -608,43 +613,34 @@ exports.searchProperties = async (req, res, next) => {
 
         if (parsedBhk || sqft) {
             const configMatch = {};
-          
+
             if (parsedBhk) {
                 configMatch.unitType = {
                     $regex: new RegExp(`${parsedBhk}\\s*BHK`, 'i')
-                };                
-            }
-          
-            if (sqft) {
-                configMatch.subConfigurations = {
-                  $elemMatch: {
-                    carpetArea: {
-                      $gte: sqft - 50,
-                      $lte: sqft + 50
-                    }
-                  }
                 };
             }
-              
-            configSearchConditions.push({
-              configurations: { $elemMatch: configMatch }
-            });
+
+            if (Object.keys(configMatch).length > 0) {
+                configSearchConditions.push({
+                    configurations: { $elemMatch: configMatch }
+                });
+            }
         }
-          
+
         if (textSearchConditions.length > 0) {
             andConditions.push({ $or: textSearchConditions });
         }
 
         if (configSearchConditions.length > 0) {
             andConditions.push(...configSearchConditions);
-        }         
+        }
 
         if (developerIds.length > 0) {
             andConditions.push({
-              developer: { $in: developerIds }
+                developer: { $in: developerIds }
             });
-        }  
-          
+        }
+
         if (andConditions.length > 0) {
             propertyFilter.$and = andConditions;
         }
@@ -694,23 +690,24 @@ exports.searchProperties = async (req, res, next) => {
             if (typeof priceStr === 'number') {
                 return priceStr;
             }
-        
+
             if (typeof priceStr !== 'string') {
                 return 0;
             }
-        
+
             let priceNum = parseFloat(priceStr.replace(/[₹,\s]/g, '')) || 0;
             const priceStrLower = priceStr.toLowerCase();
-        
+
             if (priceStrLower.includes('lakh') || priceStrLower.includes('lac') || priceStrLower.includes('l')) {
                 priceNum = priceNum * 100000;
-            } 
+            }
             else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
                 priceNum = priceNum * 10000000;
             }
             return priceNum;
         };
 
+        // Apply price range filter (in rupees) on configuration / developer / offer prices
         if (priceMin || priceMax) {
             const minPriceFilter = priceMin ? parsePriceToNumber(priceMin) : 0;
             const maxPriceFilter = priceMax ? parsePriceToNumber(priceMax) : Infinity;
@@ -732,6 +729,37 @@ exports.searchProperties = async (req, res, next) => {
             });
         }
 
+        if (sqft) {
+            const targetMinArea = sqft - 50;
+            const targetMaxArea = sqft + 50;
+
+            allProperties = allProperties.filter(property => {
+                const areas = [];
+
+                if (property.configurations && Array.isArray(property.configurations)) {
+                    property.configurations.forEach(config => {
+                        if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
+                            config.subConfigurations.forEach(subConfig => {
+                                const carpetArea = parseFloat(subConfig.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                                if (!isNaN(carpetArea) && carpetArea > 0) {
+                                    areas.push(carpetArea);
+                                }
+                            });
+                        } else if (config.carpetArea) {
+                            const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
+                            if (!isNaN(carpetArea) && carpetArea > 0) {
+                                areas.push(carpetArea);
+                            }
+                        }
+                    });
+                }
+
+                if (areas.length === 0) return false;
+
+                return areas.some(area => area >= targetMinArea && area <= targetMaxArea);
+            });
+        }
+
         if (sortBy === 'newAdded') {
             allProperties.sort((a, b) => {
                 const dateA = a.createdAt ? new Date(a.createdAt) : new Date(0);
@@ -745,7 +773,7 @@ exports.searchProperties = async (req, res, next) => {
                 return dateA - dateB;
             });
         }
-        else if (sortBy === 'priceLow') {
+        else if (sortBy === 'priceLow' || sortBy === 'priceLowToHigh' || sortBy === 'lowToHigh') {
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -767,7 +795,7 @@ exports.searchProperties = async (req, res, next) => {
                 const priceB = pricesB.length > 0 ? Math.min(...pricesB) : 0;
                 return priceA - priceB;
             });
-        } else if (sortBy === 'priceHigh') {
+        } else if (sortBy === 'priceHigh' || sortBy === 'priceHighToLow' || sortBy === 'highToLow') {
             const parsePrice = (price) => {
                 if (!price) return 0;
                 if (typeof price === 'number') return price;
@@ -836,7 +864,7 @@ exports.searchProperties = async (req, res, next) => {
             if (!dev) return null;
             return dev._id ? dev._id.toString() : dev.toString();
         }).filter(Boolean))];
-          
+
         const developers = await Developer.find({ _id: { $in: developerIdsForMapping } })
             .select('_id developerName')
             .lean();
