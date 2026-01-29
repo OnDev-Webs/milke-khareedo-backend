@@ -1475,21 +1475,21 @@ exports.updateDeveloper = async (req, res, next) => {
 exports.deleteDeveloper = async (req, res, next) => {
     try {
         const developerId = req.params.id;
-        
+
         // Check if developer exists
         const developer = await Developer.findById(developerId);
         if (!developer) {
-            return res.status(404).json({ 
-                success: false, 
-                message: 'Developer not found' 
+            return res.status(404).json({
+                success: false,
+                message: 'Developer not found'
             });
         }
 
         // Find all properties associated with this developer
         const Property = require('../models/property');
-        const properties = await Property.find({ 
+        const properties = await Property.find({
             developer: developerId,
-            isStatus: true 
+            isStatus: true
         }).select('_id projectName').lean();
 
         // Mark all related properties as inactive (isStatus: false)
@@ -1513,8 +1513,8 @@ exports.deleteDeveloper = async (req, res, next) => {
         // Delete the developer
         await Developer.findByIdAndDelete(developerId);
 
-        res.json({ 
-            success: true, 
+        res.json({
+            success: true,
             message: `Developer deleted successfully. ${properties.length} associated property/properties have been hidden from users.`,
             data: {
                 deletedDeveloper: developer.developerName,
@@ -3451,6 +3451,7 @@ exports.getFilteredLeads = async (req, res) => {
 exports.getCRMDashboard = async (req, res, next) => {
     try {
         const userId = req.user.userId;
+        const role = req.user.roleName?.toLowerCase();
         const {
             dateRange = 'past_24_hours', // past_24_hours, past_7_days, past_30_days
             sortBy = 'newest_first', // newest_first, oldest_first, name_asc, name_desc
@@ -3458,15 +3459,61 @@ exports.getCRMDashboard = async (req, res, next) => {
             limit = 10
         } = req.query;
 
-        const userProperties = await Property.find({
-            $or: [
-                { relationshipManager: userId },
-                { leadDistributionAgents: userId }
-            ],
-            isStatus: true
-        }).select('_id').lean();
+        // Check if user is Admin or Super Admin - they should see ALL leads
+        const isAdminOrSuperAdmin = role === 'admin' || role === 'super admin';
 
-        const propertyIds = userProperties.map(p => p._id);
+        let propertyIds = [];
+        if (!isAdminOrSuperAdmin) {
+            // For non-admin users, filter by their properties
+            const userProperties = await Property.find({
+                $or: [
+                    { relationshipManager: userId },
+                    { leadDistributionAgents: userId }
+                ],
+                isStatus: true
+            }).select('_id').lean();
+
+            propertyIds = userProperties.map(p => p._id);
+
+            if (propertyIds.length === 0) {
+                return res.json({
+                    success: true,
+                    message: "CRM Dashboard data fetched",
+                    data: {
+                        kpis: {
+                            leadsReceived: 0,
+                            leadsContacted: 0,
+                            leadsContactedPercentage: 0,
+                            responseTime: "0H"
+                        },
+                        followUps: {
+                            today: {
+                                label: "Today's Follow Ups",
+                                count: 0,
+                                data: []
+                            },
+                            yesterday: {
+                                label: "Yesterday's Follow Ups",
+                                count: 0,
+                                data: []
+                            },
+                            thisMonth: {
+                                label: "This Month's Follow Ups",
+                                count: 0,
+                                data: []
+                            }
+                        },
+                        leads: [],
+                        pagination: {
+                            total: 0,
+                            page: parseInt(page),
+                            limit: parseInt(limit),
+                            totalPages: 0
+                        }
+                    }
+                });
+            }
+        }
 
         let now = new Date();
         let dateFilter = {};
@@ -3484,79 +3531,36 @@ exports.getCRMDashboard = async (req, res, next) => {
 
         const leadFilter = {
             isStatus: true,
-            ...(propertyIds.length > 0 ? { propertyId: { $in: propertyIds } } : {})
+            ...(isAdminOrSuperAdmin ? {} : { propertyId: { $in: propertyIds } })
         };
 
-        if (propertyIds.length === 0) {
-            return res.json({
-                success: true,
-                message: "CRM Dashboard data fetched",
-                data: {
-                    kpis: {
-                        leadsReceived: 0,
-                        leadsContacted: 0,
-                        leadsContactedPercentage: 0,
-                        responseTime: "0H"
-                    },
-                    followUps: {
-                        today: {
-                            label: "Today's Follow Ups",
-                            count: 0,
-                            data: []
-                        },
-                        yesterday: {
-                            label: "Yesterday's Follow Ups",
-                            count: 0,
-                            data: []
-                        },
-                        thisMonth: {
-                            label: "This Month's Follow Ups",
-                            count: 0,
-                            data: []
-                        }
-                    },
-                    leads: [],
-                    pagination: {
-                        total: 0,
-                        page: parseInt(page),
-                        limit: parseInt(limit),
-                        totalPages: 0
-                    }
-                }
-            });
-        }
+        const allLeads = await leadModal.find({
+            ...leadFilter,
+            ...dateFilter
+        }).select('_id createdAt').lean();
 
-        const [totalLeads, contactedLeads, allLeadsForResponseTime] = await Promise.all([
-            leadModal.countDocuments({
-                ...leadFilter,
-                ...dateFilter
-            }),
-            leadModal.countDocuments({
-                ...leadFilter,
-                ...dateFilter,
-                visitStatus: { $in: ['visited', 'follow_up'] }
-            }),
-            leadModal.find({
-                ...leadFilter,
-                ...dateFilter
-            }).select('createdAt relationshipManagerId').lean()
-        ]);
+        const totalLeads = allLeads.length;
+        const allLeadIds = allLeads.map(l => l._id);
 
+        let contactedLeadIds = [];
         let avgResponseTimeHours = 0;
-        if (contactedLeads > 0) {
-            const contactedLeadIds = await leadModal.find({
-                ...leadFilter,
-                ...dateFilter,
-                visitStatus: { $in: ['visited', 'follow_up'] }
-            }).select('_id createdAt').lean();
 
-            const leadIds = contactedLeadIds.map(l => l._id);
+        if (allLeadIds.length > 0) {
+            const contactActivities = await LeadActivity.find({
+                leadId: { $in: allLeadIds },
+                activityType: { $in: ['phone_call', 'whatsapp', 'email', 'visit'] }
+            }).select('leadId activityDate').lean();
 
-            if (leadIds.length > 0) {
+            const contactedLeadIdSet = new Set(
+                contactActivities.map(activity => activity.leadId?.toString()).filter(Boolean)
+            );
+            contactedLeadIds = Array.from(contactedLeadIdSet).map(id => new mongoose.Types.ObjectId(id));
+
+            if (contactedLeadIds.length > 0) {
                 const firstContacts = await LeadActivity.aggregate([
                     {
                         $match: {
-                            leadId: { $in: leadIds },
+                            leadId: { $in: contactedLeadIds },
                             activityType: { $in: ['phone_call', 'whatsapp', 'email', 'visit'] }
                         }
                     },
@@ -3572,8 +3576,8 @@ exports.getCRMDashboard = async (req, res, next) => {
                 let count = 0;
 
                 for (const contact of firstContacts) {
-                    const lead = contactedLeadIds.find(l => l._id.toString() === contact._id.toString());
-                    if (lead) {
+                    const lead = allLeads.find(l => l._id.toString() === contact._id.toString());
+                    if (lead && contact.firstContactDate) {
                         const responseTimeMs = new Date(contact.firstContactDate) - new Date(lead.createdAt);
                         const responseTimeHours = responseTimeMs / (1000 * 60 * 60);
                         if (responseTimeHours > 0) {
@@ -3587,6 +3591,7 @@ exports.getCRMDashboard = async (req, res, next) => {
             }
         }
 
+        const contactedLeads = contactedLeadIds.length;
         const leadsContactedPercentage = totalLeads > 0
             ? Math.round((contactedLeads / totalLeads) * 100)
             : 0;
@@ -3657,7 +3662,11 @@ exports.getCRMDashboard = async (req, res, next) => {
             };
         };
 
-        // Fetch all follow-up activities for the user's properties (Today, Yesterday, This Month)
+        const followUpLeadFilter = {
+            isStatus: true,
+            ...(isAdminOrSuperAdmin ? {} : { propertyId: { $in: propertyIds } })
+        };
+
         const allFollowUpActivities = await LeadActivity.find({
             activityType: 'follow_up',
             nextFollowUpDate: {
@@ -3667,10 +3676,7 @@ exports.getCRMDashboard = async (req, res, next) => {
         })
             .populate({
                 path: 'leadId',
-                match: {
-                    ...leadFilter,
-                    isStatus: true
-                },
+                match: followUpLeadFilter,
                 populate: [
                     {
                         path: 'userId',
@@ -3697,8 +3703,14 @@ exports.getCRMDashboard = async (req, res, next) => {
             const formattedData = formatFollowUpData(activity);
             if (!formattedData) return;
 
-            // Today's follow-ups
-            if (followUpDate >= today && followUpDate < tomorrow) {
+            // Today's follow-ups - check if date matches today (date only, ignore time)
+            const followUpDateOnly = new Date(followUpDate);
+            followUpDateOnly.setHours(0, 0, 0, 0);
+            const todayDateOnly = new Date(today);
+            todayDateOnly.setHours(0, 0, 0, 0);
+
+            if (followUpDateOnly.getTime() === todayDateOnly.getTime()) {
+                // Today's follow-ups
                 todaysFollowUps.push(formattedData);
             }
             // Yesterday's follow-ups
@@ -5345,4 +5357,3 @@ exports.deleteBlog = async (req, res, next) => {
     }
 };
 
-  
