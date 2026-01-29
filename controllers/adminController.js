@@ -1474,10 +1474,58 @@ exports.updateDeveloper = async (req, res, next) => {
 // ===================== DELETE DEVELOPER =====================
 exports.deleteDeveloper = async (req, res, next) => {
     try {
-        const developer = await Developer.findByIdAndDelete(req.params.id);
-        if (!developer) return res.status(404).json({ success: false, message: 'Developer not found' });
-        res.json({ success: true, message: 'Developer deleted successfully' });
+        const developerId = req.params.id;
+        
+        // Check if developer exists
+        const developer = await Developer.findById(developerId);
+        if (!developer) {
+            return res.status(404).json({ 
+                success: false, 
+                message: 'Developer not found' 
+            });
+        }
+
+        // Find all properties associated with this developer
+        const Property = require('../models/property');
+        const properties = await Property.find({ 
+            developer: developerId,
+            isStatus: true 
+        }).select('_id projectName').lean();
+
+        // Mark all related properties as inactive (isStatus: false)
+        // This ensures properties won't show to users when developer is deleted
+        if (properties.length > 0) {
+            const propertyIds = properties.map(p => p._id);
+            await Property.updateMany(
+                { _id: { $in: propertyIds } },
+                { isStatus: false }
+            );
+
+            const { logInfo } = require('../utils/logger');
+            logInfo('Properties deactivated due to developer deletion', {
+                developerId,
+                developerName: developer.developerName,
+                propertiesCount: properties.length,
+                propertyIds: propertyIds
+            });
+        }
+
+        // Delete the developer
+        await Developer.findByIdAndDelete(developerId);
+
+        res.json({ 
+            success: true, 
+            message: `Developer deleted successfully. ${properties.length} associated property/properties have been hidden from users.`,
+            data: {
+                deletedDeveloper: developer.developerName,
+                deactivatedPropertiesCount: properties.length
+            }
+        });
     } catch (error) {
+        const { logError } = require('../utils/logger');
+        logError('Error deleting developer', error, {
+            developerId: req.params.id
+        });
         next(error);
     }
 };

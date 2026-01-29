@@ -286,137 +286,145 @@ exports.getTopVisitedProperties = async (req, res, next) => {
             activeLeadsCounts.map(item => [item._id.toString(), item.activeLeadsCount])
         );
 
-        const formattedProperties = rawData.map((item) => {
-            const property = item;
-            const leadCount = property.leadCount || 0;
-            const propertyIdStr = property._id.toString();
-            const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
+        const formattedProperties = rawData
+            .filter((item) => {
+                // Filter out properties where developer doesn't exist (developer may be deleted)
+                const developerId = item.developer?._id
+                    ? item.developer._id.toString()
+                    : (item.developer?.toString() || item.developer);
+                return developerId && developerMap.has(developerId);
+            })
+            .map((item) => {
+                const property = item;
+                const leadCount = property.leadCount || 0;
+                const propertyIdStr = property._id.toString();
+                const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
 
-            const developerId = property.developer?._id
-                ? property.developer._id.toString()
-                : (property.developer?.toString() || property.developer);
-            const developerInfo = developerMap.get(developerId);
+                const developerId = property.developer?._id
+                    ? property.developer._id.toString()
+                    : (property.developer?.toString() || property.developer);
+                const developerInfo = developerMap.get(developerId);
 
-            const parsePrice = (price) => {
-                if (!price) return 0;
-                if (typeof price === 'number') return price;
-                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-                const priceStrLower = price.toString().toLowerCase();
-                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                    priceNum = priceNum * 10000000;
+                const parsePrice = (price) => {
+                    if (!price) return 0;
+                    if (typeof price === 'number') return price;
+                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                    const priceStrLower = price.toString().toLowerCase();
+                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                        priceNum = priceNum * 100000;
+                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                        priceNum = priceNum * 10000000;
+                    }
+                    return priceNum;
+                };
+                const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+                const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
+
+                const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+                const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+
+                const images = formatPropertyImages(property.images);
+
+                let lastDayToJoin = null;
+                if (property.possessionDate) {
+                    const date = new Date(property.possessionDate);
+                    lastDayToJoin = date.toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric'
+                    });
                 }
-                return priceNum;
-            };
-            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
-            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
-            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
-            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+                let discountAmount = 0;
+                let discountPercentageValue = 0;
+                let offerPriceNum = 0;
 
-            const images = formatPropertyImages(property.images);
+                const parsePriceForDiscount = (price) => {
+                    if (!price) return 0;
+                    if (typeof price === 'number') return price;
+                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                    const priceStrLower = price.toString().toLowerCase();
+                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                        priceNum = priceNum * 100000;
+                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                        priceNum = priceNum * 10000000;
+                    }
+                    return priceNum;
+                };
 
-            let lastDayToJoin = null;
-            if (property.possessionDate) {
-                const date = new Date(property.possessionDate);
-                lastDayToJoin = date.toLocaleDateString('en-IN', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric'
-                });
-            }
+                const devPriceNum = parsePriceForDiscount(property.developerPrice);
+                offerPriceNum = parsePriceForDiscount(property.offerPrice);
 
-            let discountAmount = 0;
-            let discountPercentageValue = 0;
-            let offerPriceNum = 0;
-
-            const parsePriceForDiscount = (price) => {
-                if (!price) return 0;
-                if (typeof price === 'number') return price;
-                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-                const priceStrLower = price.toString().toLowerCase();
-                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                    priceNum = priceNum * 10000000;
+                // Calculate discount
+                if (property.discountPercentage) {
+                    discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
+                    if (devPriceNum > 0 && discountPercentageValue > 0) {
+                        discountAmount = (devPriceNum * discountPercentageValue) / 100;
+                    }
+                } else if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
+                    discountAmount = devPriceNum - offerPriceNum;
+                    discountPercentageValue = parseFloat(((discountAmount / devPriceNum) * 100).toFixed(2));
                 }
-                return priceNum;
-            };
 
-            const devPriceNum = parsePriceForDiscount(property.developerPrice);
-            offerPriceNum = parsePriceForDiscount(property.offerPrice);
+                const formatPrice = (amount) => {
+                    if (!amount || amount === 0) return '₹ 0';
+                    if (amount >= 10000000) {
+                        return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
+                    } else if (amount >= 100000) {
+                        return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
+                    } else {
+                        return `₹ ${amount.toLocaleString('en-IN')}`;
+                    }
+                };
 
-            // Calculate discount
-            if (property.discountPercentage) {
-                discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
-                if (devPriceNum > 0 && discountPercentageValue > 0) {
-                    discountAmount = (devPriceNum * discountPercentageValue) / 100;
-                }
-            } else if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
-                discountAmount = devPriceNum - offerPriceNum;
-                discountPercentageValue = parseFloat(((discountAmount / devPriceNum) * 100).toFixed(2));
-            }
+                const propertyId = property._id.toString();
+                const isFavorite = favoritePropertyIds.has(propertyId);
+                const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+                const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
-            const formatPrice = (amount) => {
-                if (!amount || amount === 0) return '₹ 0';
-                if (amount >= 10000000) {
-                    return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
-                } else if (amount >= 100000) {
-                    return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
-                } else {
-                    return `₹ ${amount.toLocaleString('en-IN')}`;
-                }
-            };
-
-            const propertyId = property._id.toString();
-            const isFavorite = favoritePropertyIds.has(propertyId);
-            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
-            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
-
-            return {
-                id: property._id,
-                projectId: property.projectId,
-                projectName: property.projectName,
-                location: property.location,
-                latitude: property.latitude || null,
-                longitude: property.longitude || null,
-                images: images,
-                image: images.length > 0 ? images[0] : null,
-                isFavorite: isFavorite,
-                isJoinGroup: isJoinGroup,
-                isBookVisit: isBookVisit,
-                isAuthenticated: isAuthenticated,
-                lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
-                groupSize: property.minGroupMembers || 0,
-                openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
-                targetPrice: {
-                    value: minPrice,
-                    formatted: formatPrice(minPrice)
-                },
-                developerPrice: {
-                    value: devPriceNum,
-                    formatted: formatPrice(devPriceNum)
-                },
-                discount: discountAmount > 0 && discountPercentageValue > 0 ? {
-                    amount: discountAmount,
-                    amountFormatted: formatPrice(discountAmount),
-                    percentage: discountPercentageValue,
-                    percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
-                    message: `Get upto ${discountPercentageValue.toFixed(2)}% discount on this property`,
-                    displayText: `Up to ${formatPrice(discountAmount)}`
-                } : null,
-                offerPrice: offerPriceNum > 0 ? formatPrice(offerPriceNum) : null,
-                discountPercentage: property.discountPercentage || "00.00%",
-                configurations: property.configurations || [],
-                possessionStatus: property.possessionStatus || 'N/A',
-                developer: developerInfo?.developerName || 'N/A',
-                leadCount: leadCount,
-                reraId: property.reraId,
-                description: property.description,
-                relationshipManager: property.relationshipManager ? property.relationshipManager.toString() : null
-            };
-        });
+                return {
+                    id: property._id,
+                    projectId: property.projectId,
+                    projectName: property.projectName,
+                    location: property.location,
+                    latitude: property.latitude || null,
+                    longitude: property.longitude || null,
+                    images: images,
+                    image: images.length > 0 ? images[0] : null,
+                    isFavorite: isFavorite,
+                    isJoinGroup: isJoinGroup,
+                    isBookVisit: isBookVisit,
+                    isAuthenticated: isAuthenticated,
+                    lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
+                    groupSize: property.minGroupMembers || 0,
+                    openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
+                    targetPrice: {
+                        value: minPrice,
+                        formatted: formatPrice(minPrice)
+                    },
+                    developerPrice: {
+                        value: devPriceNum,
+                        formatted: formatPrice(devPriceNum)
+                    },
+                    discount: discountAmount > 0 && discountPercentageValue > 0 ? {
+                        amount: discountAmount,
+                        amountFormatted: formatPrice(discountAmount),
+                        percentage: discountPercentageValue,
+                        percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
+                        message: `Get upto ${discountPercentageValue.toFixed(2)}% discount on this property`,
+                        displayText: `Up to ${formatPrice(discountAmount)}`
+                    } : null,
+                    offerPrice: offerPriceNum > 0 ? formatPrice(offerPriceNum) : null,
+                    discountPercentage: property.discountPercentage || "00.00%",
+                    configurations: property.configurations || [],
+                    possessionStatus: property.possessionStatus || 'N/A',
+                    developer: developerInfo?.developerName || 'N/A',
+                    leadCount: leadCount,
+                    reraId: property.reraId,
+                    description: property.description,
+                    relationshipManager: property.relationshipManager ? property.relationshipManager.toString() : null
+                };
+            });
 
         logInfo('Top properties fetched (by lead count)', {
             total,
@@ -870,59 +878,25 @@ exports.searchProperties = async (req, res, next) => {
             .lean();
         const developerMap = new Map(developers.map(dev => [dev._id.toString(), dev]));
 
-        const formattedProperties = paginatedProperties.map((property) => {
-            const leadCount = property.leadCount || 0;
-            const propertyIdStr = property._id.toString();
-            const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
+        const formattedProperties = paginatedProperties
+            .filter((property) => {
+                // Filter out properties where developer doesn't exist (developer may be deleted)
+                const developerId = property.developer?._id
+                    ? property.developer._id.toString()
+                    : (property.developer?.toString() || property.developer);
+                return developerId && developerMap.has(developerId);
+            })
+            .map((property) => {
+                const leadCount = property.leadCount || 0;
+                const propertyIdStr = property._id.toString();
+                const activeLeadsCount = activeLeadsMap.get(propertyIdStr) || 0;
 
-            const developerId = property.developer?._id
-                ? property.developer._id.toString()
-                : (property.developer?.toString() || property.developer);
-            const developerInfo = developerMap.get(developerId);
+                const developerId = property.developer?._id
+                    ? property.developer._id.toString()
+                    : (property.developer?.toString() || property.developer);
+                const developerInfo = developerMap.get(developerId);
 
-            const parsePrice = (price) => {
-                if (!price) return 0;
-                if (typeof price === 'number') return price;
-                let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
-                const priceStrLower = price.toString().toLowerCase();
-                if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
-                    priceNum = priceNum * 100000;
-                } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
-                    priceNum = priceNum * 10000000;
-                }
-                return priceNum;
-            };
-            const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
-            const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
-
-            const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
-            const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
-
-            const unitTypes = [...new Set(property.configurations?.map(config => config.unitType).filter(Boolean) || [])];
-
-            const images = formatPropertyImages(property.images);
-
-            let lastDayToJoin = null;
-            if (property.possessionDate) {
-                const date = new Date(property.possessionDate);
-                lastDayToJoin = date.toLocaleDateString('en-IN', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric'
-                });
-            }
-
-            let discountAmount = 0;
-            let discountPercentageValue = 0;
-            let offerPriceNum = 0;
-
-            if (property.discountPercentage) {
-                discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
-            }
-
-            if (property.developerPrice && property.offerPrice) {
-                // Helper to parse price (handles both number and string for legacy support)
-                const parsePriceForDiscount = (price) => {
+                const parsePrice = (price) => {
                     if (!price) return 0;
                     if (typeof price === 'number') return price;
                     let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
@@ -934,76 +908,118 @@ exports.searchProperties = async (req, res, next) => {
                     }
                     return priceNum;
                 };
-                const devPrice = parsePriceForDiscount(property.developerPrice);
-                offerPriceNum = parsePriceForDiscount(property.offerPrice);
+                const fallbackPrice = parsePrice(property.developerPrice || property.offerPrice || 0);
+                const prices = extractPricesFromConfigurations(property.configurations, fallbackPrice);
 
-                if (devPrice > 0 && offerPriceNum > 0 && devPrice > offerPriceNum) {
-                    discountAmount = devPrice - offerPriceNum;
-                    if (!property.discountPercentage) {
-                        discountPercentageValue = parseFloat(((discountAmount / devPrice) * 100).toFixed(2));
+                const minPrice = prices.length > 0 ? Math.min(...prices) : 0;
+                const maxPrice = prices.length > 0 ? Math.max(...prices) : 0;
+
+                const unitTypes = [...new Set(property.configurations?.map(config => config.unitType).filter(Boolean) || [])];
+
+                const images = formatPropertyImages(property.images);
+
+                let lastDayToJoin = null;
+                if (property.possessionDate) {
+                    const date = new Date(property.possessionDate);
+                    lastDayToJoin = date.toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        year: 'numeric'
+                    });
+                }
+
+                let discountAmount = 0;
+                let discountPercentageValue = 0;
+                let offerPriceNum = 0;
+
+                if (property.discountPercentage) {
+                    discountPercentageValue = parseFloat(property.discountPercentage.replace('%', '')) || 0;
+                }
+
+                if (property.developerPrice && property.offerPrice) {
+                    // Helper to parse price (handles both number and string for legacy support)
+                    const parsePriceForDiscount = (price) => {
+                        if (!price) return 0;
+                        if (typeof price === 'number') return price;
+                        let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                        const priceStrLower = price.toString().toLowerCase();
+                        if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                            priceNum = priceNum * 100000;
+                        } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                            priceNum = priceNum * 10000000;
+                        }
+                        return priceNum;
+                    };
+                    const devPrice = parsePriceForDiscount(property.developerPrice);
+                    offerPriceNum = parsePriceForDiscount(property.offerPrice);
+
+                    if (devPrice > 0 && offerPriceNum > 0 && devPrice > offerPriceNum) {
+                        discountAmount = devPrice - offerPriceNum;
+                        if (!property.discountPercentage) {
+                            discountPercentageValue = parseFloat(((discountAmount / devPrice) * 100).toFixed(2));
+                        }
                     }
                 }
-            }
 
-            const formatPrice = (amount) => {
-                if (amount >= 10000000) {
-                    return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
-                } else if (amount >= 100000) {
-                    return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
-                } else {
-                    return `₹ ${amount.toLocaleString('en-IN')}`;
-                }
-            };
+                const formatPrice = (amount) => {
+                    if (amount >= 10000000) {
+                        return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
+                    } else if (amount >= 100000) {
+                        return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
+                    } else {
+                        return `₹ ${amount.toLocaleString('en-IN')}`;
+                    }
+                };
 
-            const propertyId = property._id.toString();
-            const isFavorite = favoritePropertyIds.has(propertyId);
-            const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
-            const isBookVisit = bookedVisitPropertyIds.has(propertyId);
+                const propertyId = property._id.toString();
+                const isFavorite = favoritePropertyIds.has(propertyId);
+                const isJoinGroup = joinedGroupPropertyIds.has(propertyId);
+                const isBookVisit = bookedVisitPropertyIds.has(propertyId);
 
-            return {
-                id: property._id,
-                projectId: property.projectId,
-                projectName: property.projectName,
-                location: property.location,
-                latitude: property.latitude || null,
-                longitude: property.longitude || null,
-                images: images,
-                image: images.length > 0 ? images[0] : null,
-                isFavorite: isFavorite,
-                isJoinGroup: isJoinGroup,
-                isBookVisit: isBookVisit,
-                isAuthenticated: isAuthenticated,
-                lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
-                groupSize: property.minGroupMembers || 0,
-                openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
-                targetPrice: {
-                    value: minPrice,
-                    formatted: formatPrice(minPrice)
-                },
-                developerPrice: {
-                    value: maxPrice,
-                    formatted: formatPrice(maxPrice)
-                },
-                discount: discountAmount > 0 ? {
-                    amount: discountAmount,
-                    amountFormatted: formatPrice(discountAmount),
-                    percentage: discountPercentageValue,
-                    percentageFormatted: property.discountPercentage || `${discountPercentageValue.toFixed(2)}%`,
-                    message: discountPercentageValue > 0 ? `Get upto ${discountPercentageValue}% discount on this property` : null,
-                    displayText: `Up to ${formatPrice(discountAmount)}`
-                } : null,
-                offerPrice: property.offerPrice || null,
-                discountPercentage: property.discountPercentage || "00.00%",
-                configurations: unitTypes,
-                configurationsFormatted: unitTypes.join(', '),
-                possessionStatus: property.possessionStatus || 'N/A',
-                developer: developerInfo?.developerName || 'N/A',
-                leadCount: leadCount,
-                reraId: property.reraId,
-                description: property.description,
-                relationshipManager: property.relationshipManager || null
-            };
-        });
+                return {
+                    id: property._id,
+                    projectId: property.projectId,
+                    projectName: property.projectName,
+                    location: property.location,
+                    latitude: property.latitude || null,
+                    longitude: property.longitude || null,
+                    images: images,
+                    image: images.length > 0 ? images[0] : null,
+                    isFavorite: isFavorite,
+                    isJoinGroup: isJoinGroup,
+                    isBookVisit: isBookVisit,
+                    isAuthenticated: isAuthenticated,
+                    lastDayToJoin: lastDayToJoin ? `Last Day to join ${lastDayToJoin}` : null,
+                    groupSize: property.minGroupMembers || 0,
+                    openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
+                    targetPrice: {
+                        value: minPrice,
+                        formatted: formatPrice(minPrice)
+                    },
+                    developerPrice: {
+                        value: maxPrice,
+                        formatted: formatPrice(maxPrice)
+                    },
+                    discount: discountAmount > 0 ? {
+                        amount: discountAmount,
+                        amountFormatted: formatPrice(discountAmount),
+                        percentage: discountPercentageValue,
+                        percentageFormatted: property.discountPercentage || `${discountPercentageValue.toFixed(2)}%`,
+                        message: discountPercentageValue > 0 ? `Get upto ${discountPercentageValue}% discount on this property` : null,
+                        displayText: `Up to ${formatPrice(discountAmount)}`
+                    } : null,
+                    offerPrice: property.offerPrice || null,
+                    discountPercentage: property.discountPercentage || "00.00%",
+                    configurations: unitTypes,
+                    configurationsFormatted: unitTypes.join(', '),
+                    possessionStatus: property.possessionStatus || 'N/A',
+                    developer: developerInfo?.developerName || 'N/A',
+                    leadCount: leadCount,
+                    reraId: property.reraId,
+                    description: property.description,
+                    relationshipManager: property.relationshipManager || null
+                };
+            });
 
         let searchHistoryData = null;
 
@@ -1246,6 +1262,16 @@ exports.getPropertyById = async (req, res, next) => {
 
         if (!property) {
             logInfo('Property not found', { propertyId: id });
+            return res.status(404).json({ success: false, message: "Property not found" });
+        }
+
+        if (!property.isStatus) {
+            logInfo('Property is inactive', { propertyId: id });
+            return res.status(404).json({ success: false, message: "Property not found" });
+        }
+
+        if (!property.developer) {
+            logInfo('Property developer not found (developer may be deleted)', { propertyId: id });
             return res.status(404).json({ success: false, message: "Property not found" });
         }
 
