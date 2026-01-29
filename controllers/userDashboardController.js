@@ -320,25 +320,25 @@ const formatPropertyData = async (property, userId = null) => {
     offerPrice:
       offerPriceNum > 0
         ? {
-            value: offerPriceNum,
-            formatted: formatPrice(offerPriceNum),
-          }
+          value: offerPriceNum,
+          formatted: formatPrice(offerPriceNum),
+        }
         : null,
     price:
       devPriceNum > 0
         ? formatPrice(devPriceNum)
         : offerPriceNum > 0
-        ? formatPrice(offerPriceNum)
-        : null,
+          ? formatPrice(offerPriceNum)
+          : null,
     relationshipManagerPhone: formattedRmPhone,
     discount:
       discountAmount > 0 && discountPercentageValue > 0
         ? {
-            amount: discountAmount,
-            amountFormatted: formatPrice(discountAmount),
-            percentage: discountPercentageValue,
-            percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
-          }
+          amount: discountAmount,
+          amountFormatted: formatPrice(discountAmount),
+          percentage: discountPercentageValue,
+          percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
+        }
         : null,
     isJoinGroup: isJoinGroup,
     isBookVisit: isBookVisit,
@@ -718,6 +718,204 @@ exports.registerUpdateVisit = async (req, res) => {
     });
   } catch (error) {
     res.json({ success: false, message: error.message });
+  }
+};
+
+// @desc    Reschedule Site Visit - Update visit date/time for existing booked visit
+// @route   PUT /api/user_dashboard/property/reschedule-visit
+// @access  Private (authenticated)
+exports.rescheduleVisit = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { propertyId, visitDate, visitTime } = req.body;
+
+    // Validation
+    if (!propertyId) {
+      return res.status(400).json({
+        success: false,
+        message: "Property ID is required"
+      });
+    }
+
+    if (!visitDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Visit date is required"
+      });
+    }
+
+    if (!visitTime) {
+      return res.status(400).json({
+        success: false,
+        message: "Visit time is required"
+      });
+    }
+
+    // Validate date format
+    const parsedVisitDate = new Date(visitDate);
+    if (isNaN(parsedVisitDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid visit date format. Use YYYY-MM-DD format"
+      });
+    }
+
+    // Check if property exists
+    const property = await Property.findById(propertyId)
+      .populate("developer", "developerName")
+      .populate(
+        "relationshipManager",
+        "name email phone phoneNumber countryCode"
+      )
+      .select(
+        "projectName location latitude longitude configurations images developerPrice offerPrice discountPercentage minGroupMembers projectId possessionStatus developer relationshipManager possessionDate"
+      )
+      .lean();
+
+    if (!property) {
+      return res.status(404).json({
+        success: false,
+        message: "Property not found"
+      });
+    }
+
+    // Find existing lead for this user and property
+    const existingLead = await leadModal.findOne({
+      userId,
+      propertyId,
+      isStatus: true
+    }).lean();
+
+    if (!existingLead) {
+      return res.status(404).json({
+        success: false,
+        message: "No booked visit found for this property. Please book a visit first."
+      });
+    }
+
+    // Find existing visit activity
+    const existingActivity = await UserPropertyActivity.findOne({
+      userId,
+      propertyId,
+      activityType: "visited"
+    }).lean();
+
+    // Update or create UserPropertyActivity
+    if (existingActivity) {
+      await UserPropertyActivity.updateOne(
+        { _id: existingActivity._id },
+        {
+          visitDate: parsedVisitDate,
+          visitTime: visitTime,
+          visitedAt: new Date(),
+          updatedBy: userId
+        }
+      );
+    } else {
+      await UserPropertyActivity.create({
+        userId,
+        propertyId,
+        activityType: "visited",
+        visitDate: parsedVisitDate,
+        visitTime: visitTime,
+        visitedAt: new Date(),
+        updatedBy: userId,
+        isStatus: true
+      });
+    }
+
+    // Update lead with new visit date/time
+    await leadModal.updateOne(
+      { _id: existingLead._id },
+      {
+        scheduleDate: parsedVisitDate,
+        updatedBy: userId
+      }
+    );
+
+    // Get user info for activity
+    const user = await User.findById(userId).select('name firstName lastName').lean();
+    const userName = user?.name || user?.firstName || 'User';
+
+    // Find previous visit activity to get old date/time for description
+    const previousVisitActivity = await LeadActivity.findOne({
+      leadId: existingLead._id,
+      activityType: 'visit'
+    }).sort({ createdAt: -1 }).lean();
+
+    // Create new visit activity entry for reschedule (to maintain history)
+    const visitDateFormatted = parsedVisitDate.toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    });
+
+    let description = '';
+    if (previousVisitActivity && previousVisitActivity.visitDate) {
+      const oldDate = new Date(previousVisitActivity.visitDate);
+      const oldDateFormatted = oldDate.toLocaleDateString('en-IN', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric'
+      });
+      const oldTime = previousVisitActivity.visitTime || 'TBD';
+      description = `Site visit rescheduled from ${oldDateFormatted} ${oldTime} to ${visitDateFormatted} ${visitTime}`;
+    } else {
+      description = `Site visit rescheduled to ${visitDateFormatted} at ${visitTime}`;
+    }
+
+    await LeadActivity.create({
+      leadId: existingLead._id,
+      activityType: 'visit',
+      performedBy: userId,
+      performedByName: userName,
+      visitDate: parsedVisitDate,
+      visitTime: visitTime,
+      description: description,
+      activityDate: new Date()
+    });
+
+    // Format property data for response
+    const propertyData = await formatPropertyData(property, userId);
+
+    // Format visit date for response
+    const formattedVisitDate = parsedVisitDate.toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric'
+    });
+
+    logInfo('Site visit rescheduled', {
+      userId,
+      propertyId,
+      leadId: existingLead._id,
+      visitDate: parsedVisitDate,
+      visitTime
+    });
+
+    res.json({
+      success: true,
+      message: "Site visit rescheduled successfully",
+      data: {
+        ...propertyData,
+        visitDetails: {
+          visitDate: parsedVisitDate,
+          visitDateFormatted: formattedVisitDate,
+          visitTime: visitTime,
+          leadId: existingLead._id
+        }
+      }
+    });
+
+  } catch (error) {
+    logError("Error rescheduling visit", error, {
+      userId: req.user?.userId,
+      propertyId: req.body?.propertyId
+    });
+    res.status(500).json({
+      success: false,
+      message: error.message || "Error rescheduling site visit"
+    });
   }
 };
 
@@ -1143,54 +1341,54 @@ exports.getFavoritedProperties = async (req, res) => {
 // Update User Profile - For all user data updates (except preferences)
 // Get User Profile
 exports.getProfile = async (req, res) => {
-    try {
-        const userId = req.user.userId || req.user._id;
+  try {
+    const userId = req.user.userId || req.user._id;
 
-        const user = await User.findById(userId)
-            .select('-password')
-            .populate('role', 'name permissions')
-            .lean();
+    const user = await User.findById(userId)
+      .select('-password')
+      .populate('role', 'name permissions')
+      .lean();
 
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found'
-            });
-        }
-
-        res.status(200).json({
-            success: true,
-            message: "Profile fetched successfully",
-            data: {
-                user: {
-                    id: user._id,
-                    firstName: user.firstName,
-                    lastName: user.lastName,
-                    name: user.name,
-                    email: user.email,
-                    phoneNumber: user.phoneNumber,
-                    countryCode: user.countryCode,
-                    profileImage: user.profileImage || null,
-                    pincode: user.pincode || null,
-                    city: user.city || null,
-                    state: user.state || null,
-                    country: user.country || null,
-                    isPhoneVerified: user.isPhoneVerified || false,
-                    phoneVerifiedAt: user.phoneVerifiedAt || null,
-                    role: user.role || null,
-                    createdAt: user.createdAt,
-                    updatedAt: user.updatedAt
-                }
-            }
-        });
-
-    } catch (error) {
-        logError('Error fetching user profile', error, { userId: req.user?.userId || req.user?._id });
-        res.status(500).json({
-            success: false,
-            message: error.message
-        });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
     }
+
+    res.status(200).json({
+      success: true,
+      message: "Profile fetched successfully",
+      data: {
+        user: {
+          id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          name: user.name,
+          email: user.email,
+          phoneNumber: user.phoneNumber,
+          countryCode: user.countryCode,
+          profileImage: user.profileImage || null,
+          pincode: user.pincode || null,
+          city: user.city || null,
+          state: user.state || null,
+          country: user.country || null,
+          isPhoneVerified: user.isPhoneVerified || false,
+          phoneVerifiedAt: user.phoneVerifiedAt || null,
+          role: user.role || null,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt
+        }
+      }
+    });
+
+  } catch (error) {
+    logError('Error fetching user profile', error, { userId: req.user?.userId || req.user?._id });
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
 };
 
 exports.updateProfile = async (req, res) => {
@@ -1408,13 +1606,13 @@ exports.getVisitedProperties = async (req, res) => {
     upcomingLeads.sort((a, b) => {
       const dateA = new Date(
         a.visitActivity[0]?.visitDate ||
-          a.visitActivity[0]?.activityDate ||
-          a.createdAt
+        a.visitActivity[0]?.activityDate ||
+        a.createdAt
       );
       const dateB = new Date(
         b.visitActivity[0]?.visitDate ||
-          b.visitActivity[0]?.activityDate ||
-          b.createdAt
+        b.visitActivity[0]?.activityDate ||
+        b.createdAt
       );
       return dateA - dateB;
     });
@@ -1422,13 +1620,13 @@ exports.getVisitedProperties = async (req, res) => {
     completedLeads.sort((a, b) => {
       const dateA = new Date(
         a.visitActivity[0]?.visitDate ||
-          a.visitActivity[0]?.activityDate ||
-          a.createdAt
+        a.visitActivity[0]?.activityDate ||
+        a.createdAt
       );
       const dateB = new Date(
         b.visitActivity[0]?.visitDate ||
-          b.visitActivity[0]?.activityDate ||
-          b.createdAt
+        b.visitActivity[0]?.activityDate ||
+        b.createdAt
       );
       return dateB - dateA;
     });

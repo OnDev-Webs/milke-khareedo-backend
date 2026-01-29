@@ -2197,17 +2197,18 @@ exports.registerVisit = async (req, res) => {
 // @access  Public (or Private if user is logged in)
 exports.contactUs = async (req, res, next) => {
     try {
-        const { name, email, phone, message, source = "contact_us" } = req.body;
+        const { firstName, phoneNumber, email, notes } = req.body;
         const userId = req.user?.userId;
 
-        if (!name || !email || !phone) {
+        if (!firstName || !phoneNumber || !email || !notes) {
             return res.status(400).json({
                 success: false,
-                message: "Name, email, and phone are required"
+                message: "First Name, Phone Number, Email ID, and Notes are required"
             });
         }
 
-        if (phone.length !== 10 || !/^\d+$/.test(phone)) {
+        const cleanPhone = phoneNumber.replace(/[^0-9]/g, '');
+        if (cleanPhone.length !== 10 || !/^\d+$/.test(cleanPhone)) {
             return res.status(400).json({
                 success: false,
                 message: "Phone number must be 10 digits"
@@ -2226,7 +2227,7 @@ exports.contactUs = async (req, res, next) => {
         let leadUserId;
 
         if (userId) {
-            user = await User.findById(userId).select('name email phone').lean();
+            user = await User.findById(userId).select('name firstName lastName email phoneNumber phone').lean();
             if (user) {
                 leadUserId = userId;
             }
@@ -2236,9 +2237,10 @@ exports.contactUs = async (req, res, next) => {
             user = await User.findOne({
                 $or: [
                     { email: email.toLowerCase().trim() },
-                    { phone: phone }
+                    { phoneNumber: cleanPhone },
+                    { phone: cleanPhone }
                 ]
-            }).select('_id name email phone').lean();
+            }).select('_id name firstName lastName email phoneNumber phone').lean();
 
             if (user) {
                 leadUserId = user._id;
@@ -2264,9 +2266,12 @@ exports.contactUs = async (req, res, next) => {
                 const hashedPassword = await bcrypt.hash(randomPassword, salt);
 
                 const newUser = await User.create({
-                    name,
+                    firstName: firstName.trim(),
+                    name: firstName.trim(),
                     email: email.toLowerCase().trim(),
-                    phone,
+                    phoneNumber: cleanPhone,
+                    phone: cleanPhone,
+                    countryCode: '+91',
                     password: hashedPassword,
                     role: defaultRole._id
                 });
@@ -2275,7 +2280,9 @@ exports.contactUs = async (req, res, next) => {
                 user = {
                     _id: newUser._id,
                     name: newUser.name,
+                    firstName: newUser.firstName,
                     email: newUser.email,
+                    phoneNumber: newUser.phoneNumber,
                     phone: newUser.phone
                 };
             }
@@ -2284,17 +2291,24 @@ exports.contactUs = async (req, res, next) => {
         const RoleModel = require('../models/role');
         const projectManagerRole = await RoleModel.findOne({ name: 'Project Manager' }).select('_id').lean();
         const adminRole = await RoleModel.findOne({ name: 'Admin' }).select('_id').lean();
+        const superAdminRole = await RoleModel.findOne({ name: 'Super Admin' }).select('_id').lean();
 
         let defaultRM = null;
         if (projectManagerRole) {
             defaultRM = await User.findOne({ role: projectManagerRole._id })
-                .select('_id name email phone')
+                .select('_id name email phone phoneNumber')
                 .lean();
         }
 
         if (!defaultRM && adminRole) {
             defaultRM = await User.findOne({ role: adminRole._id })
-                .select('_id name email phone')
+                .select('_id name email phone phoneNumber')
+                .lean();
+        }
+
+        if (!defaultRM && superAdminRole) {
+            defaultRM = await User.findOne({ role: superAdminRole._id })
+                .select('_id name email phone phoneNumber')
                 .lean();
         }
 
@@ -2305,30 +2319,31 @@ exports.contactUs = async (req, res, next) => {
             propertyId: null,
             relationshipManagerId: defaultRM?._id || null,
             rmEmail: defaultRM?.email || '',
-            rmPhone: defaultRM?.phone || '',
-            message: message || '',
+            rmPhone: defaultRM?.phone || defaultRM?.phoneNumber || '',
+            message: notes || '',
             isStatus: true,
-            source: source,
-            status: 'pending',
+            source: "Contact Us",
+            status: 'lead_received',
             visitStatus: 'not_visited',
             ipAddress: ipAddress
         });
 
         if (lead._id) {
             const activityPerformedBy = defaultRM?._id || leadUserId;
-            const activityPerformedByName = defaultRM?.name || user?.name || 'System';
+            const activityPerformedByName = defaultRM?.name || user?.name || firstName || 'System';
 
             await addTimelineActivity(
                 lead._id,
-                'join_group',
+                'lead_received',
                 activityPerformedBy,
                 activityPerformedByName,
-                `${name} contacted us via Contact Us form${message ? `: ${message}` : ''}`,
+                `${firstName} contacted us via Contact Us form${notes ? `: ${notes}` : ''}`,
                 {
-                    source: 'contact_us',
+                    source: 'Contact Us',
+                    firstName,
                     email,
-                    phone,
-                    message: message || ''
+                    phoneNumber: cleanPhone,
+                    notes: notes || ''
                 }
             );
         }
@@ -2336,27 +2351,31 @@ exports.contactUs = async (req, res, next) => {
         logInfo('Contact Us lead created', {
             leadId: lead._id,
             userId: leadUserId,
+            firstName,
             email,
-            phone,
+            phoneNumber: cleanPhone,
+            source: 'Contact Us',
             hasProperty: false
         });
 
         res.status(201).json({
             success: true,
-            message: "Thank you for contacting us! We'll get back to you soon.",
+            message: "Thank you for contacting us! We'll reach out within 24 hours.",
             data: {
                 leadId: lead._id,
                 userId: leadUserId,
-                name: user.name,
-                email: user.email,
-                phone: user.phone
+                firstName: user?.firstName || firstName,
+                name: user?.name || firstName,
+                email: user?.email || email,
+                phoneNumber: user?.phoneNumber || user?.phone || cleanPhone
             }
         });
 
     } catch (error) {
         logError('Error creating contact us lead', error, {
             email: req.body.email,
-            phone: req.body.phone
+            phoneNumber: req.body.phoneNumber,
+            firstName: req.body.firstName
         });
         res.status(500).json({
             success: false,
