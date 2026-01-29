@@ -470,14 +470,11 @@ const parseSearchText = (text = "") => {
     const lower = text.toLowerCase();
 
     const bhkMatch = text.match(/(\d+(\.\d+)?)\s*bhk/i);
-    const sqftMatch = lower.match(/(\d+)\s*(sqft|sq\.ft|square feet)/);
-
+    
     return {
         bhk: bhkMatch ? bhkMatch[1] : null,
-        sqft: sqftMatch ? Number(sqftMatch[1]) : null,
         text: lower
             .replace(/(\d+(\.\d+)?)\s*bhk/i, '')
-            .replace(/(\d+)\s*(sqft|sq\.ft|square feet)/i, '')
             .replace(/ready to move|ready|under construction/gi, '')
             .trim()
     };
@@ -533,7 +530,6 @@ function parsePriceFromText(text) {
     return { minPrice, maxPrice };
 }
 
-
 exports.searchProperties = async (req, res, next) => {
     try {
         let {
@@ -546,7 +542,9 @@ exports.searchProperties = async (req, res, next) => {
             bhk,
             propertyType,
             projectStatus,
-            sortBy = 'leadCount'
+            sortBy = 'leadCount',
+            areaMin,
+            areaMax,
         } = req.query;
 
         page = parseInt(page);
@@ -737,36 +735,50 @@ exports.searchProperties = async (req, res, next) => {
             });
         }
 
-        if (sqft) {
-            const targetMinArea = sqft - 50;
-            const targetMaxArea = sqft + 50;
-
-            allProperties = allProperties.filter(property => {
-                const areas = [];
-
-                if (property.configurations && Array.isArray(property.configurations)) {
-                    property.configurations.forEach(config => {
-                        if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
-                            config.subConfigurations.forEach(subConfig => {
-                                const carpetArea = parseFloat(subConfig.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
-                                if (!isNaN(carpetArea) && carpetArea > 0) {
-                                    areas.push(carpetArea);
-                                }
-                            });
-                        } else if (config.carpetArea) {
-                            const carpetArea = parseFloat(config.carpetArea?.replace(/[sqft,\s]/gi, '') || '0');
-                            if (!isNaN(carpetArea) && carpetArea > 0) {
-                                areas.push(carpetArea);
-                            }
-                        }
-                    });
-                }
-
-                if (areas.length === 0) return false;
-
-                return areas.some(area => area >= targetMinArea && area <= targetMaxArea);
+        const minArea = sqft
+        ? sqft - 50
+        : areaMin
+          ? parseInt(areaMin)
+          : null;
+      
+      const maxArea = sqft
+        ? sqft + 50
+        : areaMax
+          ? parseInt(areaMax)
+          : null;
+      
+      if (minArea || maxArea) {
+        allProperties = allProperties.filter(property => {
+          const areas = [];
+      
+          if (Array.isArray(property.configurations)) {
+            property.configurations.forEach(config => {
+              if (Array.isArray(config.subConfigurations)) {
+                config.subConfigurations.forEach(sub => {
+                  const area = parseFloat(
+                    sub.carpetArea?.replace(/[^\d.]/g, '') || '0'
+                  );
+                  if (area > 0) areas.push(area);
+                });
+              } else if (config.carpetArea) {
+                const area = parseFloat(
+                  config.carpetArea.replace(/[^\d.]/g, '') || '0'
+                );
+                if (area > 0) areas.push(area);
+              }
             });
-        }
+          }
+      
+          if (!areas.length) return false;
+      
+          return areas.some(area => {
+            if (minArea && maxArea) return area >= minArea && area <= maxArea;
+            if (minArea) return area >= minArea;
+            if (maxArea) return area <= maxArea;
+            return true;
+          });
+        });
+      }
 
         if (sortBy === 'newAdded') {
             allProperties.sort((a, b) => {
@@ -1761,6 +1773,7 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                 locationMatch: locationMatch
             };
         });
+
         const topSimilar = scoredProperties
             .filter(item => {
                 return (item.budgetMatch || item.locationMatch) && item.score >= 30;
@@ -1776,6 +1789,37 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
             .slice(0, 3)
             .map(item => {
                 const prop = item.property;
+                const parsePriceForDiscount = (price) => {
+                    if (!price) return 0;
+                    if (typeof price === 'number') return price;
+                    let priceNum = parseFloat(price.toString().replace(/[₹,\s]/g, '')) || 0;
+                    const priceStrLower = price.toString().toLowerCase();
+                    if (priceStrLower.includes('lakh') || priceStrLower.includes('l')) {
+                        priceNum *= 100000;
+                    } else if (priceStrLower.includes('cr') || priceStrLower.includes('crore')) {
+                        priceNum *= 10000000;
+                    }
+                    return priceNum;
+                };
+                const devPriceNum = parsePriceForDiscount(prop.developerPrice);
+                const offerPriceNum = parsePriceForDiscount(prop.offerPrice);
+                let discountAmount = 0;
+                let discountPercentageValue = 0;
+                if (prop.discountPercentage) {
+                    discountPercentageValue = parseFloat(prop.discountPercentage.replace('%', '')) || 0;
+                    if (devPriceNum > 0 && discountPercentageValue > 0) {
+                        discountAmount = (devPriceNum * discountPercentageValue) / 100;
+                    }
+                } else if (devPriceNum > 0 && offerPriceNum > 0 && devPriceNum > offerPriceNum) {
+                    discountAmount = devPriceNum - offerPriceNum;
+                    discountPercentageValue = parseFloat(((discountAmount / devPriceNum) * 100).toFixed(2));
+                }
+                const formatPrice = (amount) => {
+                    if (!amount) return '₹ 0';
+                    if (amount >= 10000000) return `₹ ${(amount / 10000000).toFixed(2)} Crore`;
+                    if (amount >= 100000) return `₹ ${(amount / 100000).toFixed(2)} Lakh`;
+                    return `₹ ${amount.toLocaleString('en-IN')}`;
+                };
                 const simPrices = extractPricesFromConfigurations(prop.configurations, prop.developerPrice || '0');
                 const simMinPrice = simPrices.length > 0 ? Math.min(...simPrices) : 0;
                 const simMaxPrice = simPrices.length > 0 ? Math.max(...simPrices) : 0;
@@ -1819,6 +1863,14 @@ const findSimilarProjects = async (currentProperty, minPrice, maxPrice) => {
                                 ? `₹ ${(simMinPrice / 100000).toFixed(2)} Lakh`
                                 : `₹ ${simMinPrice.toLocaleString('en-IN')}`
                     },
+                    discount: discountAmount > 0 && discountPercentageValue > 0 ? {
+                        amount: discountAmount,
+                        amountFormatted: formatPrice(discountAmount),
+                        percentage: discountPercentageValue,
+                        percentageFormatted: `${discountPercentageValue.toFixed(2)}%`,
+                        message: `Get upto ${discountPercentageValue.toFixed(2)}% discount on this property`,
+                        displayText: `Up to ${formatPrice(discountAmount)}`
+                    } : null,                                           
                     disclaimerPrice: {
                         value: simMaxPrice,
                         formatted: simMaxPrice >= 10000000
