@@ -3645,6 +3645,8 @@ exports.getCRMDashboard = async (req, res, next) => {
 
             return {
                 _id: lead._id,
+                status: lead.status || 'pending',
+                projectId: property.projectId || null,
                 clientName: user.name || 'N/A',
                 phoneNumber: formattedPhone,
                 profileImage: user.profileImage || null,
@@ -3684,7 +3686,7 @@ exports.getCRMDashboard = async (req, res, next) => {
                     },
                     {
                         path: 'propertyId',
-                        select: 'projectName location'
+                        select: 'projectId projectName location'
                     }
                 ]
             })
@@ -3825,7 +3827,7 @@ exports.getCRMDashboard = async (req, res, next) => {
                 })
                 .populate({
                     path: 'propertyId',
-                    select: 'projectName location'
+                    select: 'projectId projectName location'
                 })
                 .sort(sortCriteria)
                 .skip(skip)
