@@ -565,6 +565,7 @@ exports.createProperty = async (req, res, next) => {
     longitude,
     projectSize,
     landParcel,
+totalUnits,
 
     possessionDate,
     developerPrice,
@@ -649,6 +650,8 @@ exports.createProperty = async (req, res, next) => {
     if (longitude) longitude = parseFloat(longitude);
 
     if (minGroupMembers) minGroupMembers = parseInt(minGroupMembers);
+    if (totalUnits) totalUnits = parseInt(totalUnits);
+
 
     if (possessionDate) possessionDate = new Date(possessionDate);
 
@@ -660,7 +663,15 @@ exports.createProperty = async (req, res, next) => {
 
     let uploadedQrImage = null;
 
-    const layoutImagesMap = new Map();
+const layoutImagesMap = new Map();
+
+for (const { file, key } of layoutFiles) {
+  if (!layoutImagesMap.has(key)) {
+    layoutImagesMap.set(key, []);
+  }
+
+  layoutImagesMap.get(key).push(file);
+}
 
     if (req.files) {
       Object.keys(req.files).forEach((key) => {
@@ -849,11 +860,22 @@ exports.createProperty = async (req, res, next) => {
 
             const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
 
-            if (layoutImagesMap.has(lookupKey)) {
-              const images = layoutImagesMap.get(lookupKey);
+           if (layoutImagesMap.has(lookupKey)) {
+  const files = layoutImagesMap.get(lookupKey);
+  const urls = [];
 
-              subConfig.layoutPlanImages = images;
-            } else {
+  for (const file of files) {
+    try {
+      const url = await uploadToS3(file, "properties/layouts");
+      urls.push(url);
+    } catch (err) {
+      console.error("Layout upload failed", err);
+    }
+  }
+
+  subConfig.layoutPlanImages = urls;
+}
+ else {
               const altKey1 = `${configIndex}_${subIndex}`;
 
               const altKey2 = `layout_${configIndex}_${subIndex}`;
@@ -937,6 +959,8 @@ exports.createProperty = async (req, res, next) => {
       projectSize,
 
       landParcel,
+
+      totalUnits,
 
       possessionDate,
 
@@ -1648,6 +1672,7 @@ exports.updateProperty = async (req, res, next) => {
       "longitude",
       "projectSize",
       "landParcel",
+      "totalUnits",
       "possessionDate",
       "developerPrice",
       "offerPrice",
@@ -1737,6 +1762,11 @@ exports.updateProperty = async (req, res, next) => {
         priceNum *= 10000000;
       return priceNum;
     };
+
+    if (updates.totalUnits !== undefined) {
+  updates.totalUnits = parseInt(updates.totalUnits) || 0;
+}
+
 
     if (updates.developerPrice)
       updates.developerPrice = parsePriceToNumber(updates.developerPrice);

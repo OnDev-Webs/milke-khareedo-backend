@@ -1392,7 +1392,7 @@ exports.getPropertyById = async (req, res, next) => {
             reraQrImage: property.reraQrImage,
             reraDetailsLink: property.reraQrImage || null,
             overview: {
-                units: property.configurations?.length || 0,
+                units: property.totalUnits || 0,
                 configurations: unitTypes,
                 configurationsFormatted: unitTypes.join(', '),
                 possessionStatus: property.possessionStatus || 'N/A',
