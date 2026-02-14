@@ -1816,24 +1816,39 @@ exports.updateProperty = async (req, res, next) => {
       }
     }
 
-    if (filesMap.images && filesMap.images.length > 0) {
-      const existing = await Property.findById(req.params.id)
-        .select("images")
-        .lean();
+   // ================= IMAGE FINAL STATE =================
 
-      const uploadedImages = [];
+const keepImages = [];
 
-      for (let i = 0; i < filesMap.images.length; i++) {
-        const url = await uploadToS3(filesMap.images[i]);
-        uploadedImages.push({
-          url,
-          isCover: false,
-          order: (existing?.images?.length || 0) + i + 1,
-        });
-      }
+if (req.body.existing_images) {
+  if (Array.isArray(req.body.existing_images)) {
+    keepImages.push(...req.body.existing_images);
+  } else {
+    keepImages.push(req.body.existing_images);
+  }
+}
 
-      updates.images = [...(existing?.images || []), ...uploadedImages];
+const uploadedImages = [];
+
+if (filesMap.images && filesMap.images.length > 0) {
+  for (const file of filesMap.images) {
+    try {
+      const url = await uploadToS3(file, "properties/images");
+      uploadedImages.push(url);
+    } catch (err) {
+      console.error("Image upload failed:", err);
     }
+  }
+}
+
+const finalImages = [...keepImages, ...uploadedImages];
+
+updates.images = finalImages.map((url, index) => ({
+  url,
+  isCover: index === 0,
+  order: index + 1,
+}));
+
 
     if (filesMap.reraQrImage?.[0]) {
       const qrUrl = await uploadToS3(filesMap.reraQrImage[0]);
