@@ -1912,6 +1912,28 @@ exports.updateProperty = async (req, res, next) => {
     // }
 
     // ================= LAYOUT IMAGE PROCESSING =================
+
+    const existingLayoutsMap = {};
+
+Object.keys(req.body || {}).forEach((key) => {
+  if (!key.startsWith("existing_layout_")) return;
+
+  const layoutKey = key.replace("existing_layout_", "");
+
+  if (!existingLayoutsMap[layoutKey]) {
+    existingLayoutsMap[layoutKey] = [];
+  }
+
+  const value = req.body[key];
+
+  if (Array.isArray(value)) {
+    existingLayoutsMap[layoutKey].push(...value);
+  } else {
+    existingLayoutsMap[layoutKey].push(value);
+  }
+});
+
+
     if (Object.keys(layoutFilesMap).length > 0) {
       const property = await Property.findById(req.params.id)
         .select("configurations")
@@ -1956,8 +1978,8 @@ exports.updateProperty = async (req, res, next) => {
             subConfig.layoutPlanImages = [];
           }
 
-          // append
-          subConfig.layoutPlanImages.push(...uploadedUrls);
+const existing = existingLayoutsMap[layoutKey] || [];
+subConfig.layoutPlanImages = [...existing, ...uploadedUrls];
         }
       }
 
