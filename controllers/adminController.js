@@ -663,6 +663,33 @@ totalUnits,
 
     let uploadedQrImage = null;
 
+    
+    const layoutFiles = [];
+
+    if (req.files && Array.isArray(req.files)) {
+      for (const file of req.files) {
+        if (file.fieldname && file.fieldname.startsWith("layout_")) {
+          layoutFiles.push({
+            file,
+
+            key: file.fieldname.replace("layout_", ""),
+          });
+        }
+      }
+    } else if (req.files && typeof req.files === "object") {
+      for (const [fieldName, files] of Object.entries(req.files)) {
+        if (fieldName.startsWith("layout_")) {
+          const key = fieldName.replace("layout_", "");
+
+          const fileArray = Array.isArray(files) ? files : [files];
+
+          for (const file of fileArray) {
+            layoutFiles.push({ file, key });
+          }
+        }
+      }
+    }
+
 const layoutImagesMap = new Map();
 
 for (const { file, key } of layoutFiles) {
@@ -784,31 +811,6 @@ for (const { file, key } of layoutFiles) {
           : [req.files.images]
         : [];
 
-    const layoutFiles = [];
-
-    if (req.files && Array.isArray(req.files)) {
-      for (const file of req.files) {
-        if (file.fieldname && file.fieldname.startsWith("layout_")) {
-          layoutFiles.push({
-            file,
-
-            key: file.fieldname.replace("layout_", ""),
-          });
-        }
-      }
-    } else if (req.files && typeof req.files === "object") {
-      for (const [fieldName, files] of Object.entries(req.files)) {
-        if (fieldName.startsWith("layout_")) {
-          const key = fieldName.replace("layout_", "");
-
-          const fileArray = Array.isArray(files) ? files : [files];
-
-          for (const file of fileArray) {
-            layoutFiles.push({ file, key });
-          }
-        }
-      }
-    }
 
     // Handle RERA QR image upload (quick, single file - do it synchronously)
 
@@ -1033,71 +1035,71 @@ for (const { file, key } of layoutFiles) {
 
         // Upload layout images in background
 
-        for (const { file, key } of layoutFiles) {
-          try {
-            const url = await uploadToS3(file, "properties/layouts");
+        // for (const { file, key } of layoutFiles) {
+        //   try {
+        //     const url = await uploadToS3(file, "properties/layouts");
 
-            if (!backgroundLayoutImagesMap.has(key)) {
-              backgroundLayoutImagesMap.set(key, []);
-            }
+        //     if (!backgroundLayoutImagesMap.has(key)) {
+        //       backgroundLayoutImagesMap.set(key, []);
+        //     }
 
-            backgroundLayoutImagesMap.get(key).push(url);
-          } catch (error) {
-            logError("Error uploading layout image to S3 (background)", error, {
-              fileName: file.originalname,
+        //     backgroundLayoutImagesMap.get(key).push(url);
+        //   } catch (error) {
+        //     logError("Error uploading layout image to S3 (background)", error, {
+        //       fileName: file.originalname,
 
-              propertyId: property._id,
+        //       propertyId: property._id,
 
-              key,
-            });
-          }
-        }
+        //       key,
+        //     });
+        //   }
+        // }
 
         // Update configurations with layout images
 
-        if (
-          backgroundLayoutImagesMap.size > 0 &&
-          configurations &&
-          Array.isArray(configurations)
-        ) {
-          for (
-            let configIndex = 0;
-            configIndex < configurations.length;
-            configIndex++
-          ) {
-            const config = configurations[configIndex];
+        // if (
+        //   backgroundLayoutImagesMap.size > 0 &&
+        //   configurations &&
+        //   Array.isArray(configurations)
+        // ) {
+        //   for (
+        //     let configIndex = 0;
+        //     configIndex < configurations.length;
+        //     configIndex++
+        //   ) {
+        //     const config = configurations[configIndex];
 
-            if (
-              config.subConfigurations &&
-              Array.isArray(config.subConfigurations)
-            ) {
-              for (
-                let subIndex = 0;
-                subIndex < config.subConfigurations.length;
-                subIndex++
-              ) {
-                const subConfig = config.subConfigurations[subIndex];
+        //     if (
+        //       config.subConfigurations &&
+        //       Array.isArray(config.subConfigurations)
+        //     ) {
+        //       for (
+        //         let subIndex = 0;
+        //         subIndex < config.subConfigurations.length;
+        //         subIndex++
+        //       ) {
+        //         const subConfig = config.subConfigurations[subIndex];
 
-                const unitTypeKey = (config.unitType || "").replace(/\s+/g, "");
+        //         const unitTypeKey = (config.unitType || "").replace(/\s+/g, "");
 
-                const carpetAreaKey = Math.floor(
-                  parseFloat(
-                    (subConfig.carpetArea || "")
-                      .toString()
-                      .replace(/[^0-9.]/g, ""),
-                  ) || 0,
-                ).toString();
+        //         const carpetAreaKey = Math.floor(
+        //           parseFloat(
+        //             (subConfig.carpetArea || "")
+        //               .toString()
+        //               .replace(/[^0-9.]/g, ""),
+        //           ) || 0,
+        //         ).toString();
 
-                const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
+        //         const lookupKey = `${unitTypeKey}_${carpetAreaKey}`;
 
-                if (backgroundLayoutImagesMap.has(lookupKey)) {
-                  subConfig.layoutPlanImages =
-                    backgroundLayoutImagesMap.get(lookupKey);
-                }
-              }
-            }
-          }
-        }
+        //         if (backgroundLayoutImagesMap.has(lookupKey)) {
+        //           subConfig.layoutPlanImages =
+        //             backgroundLayoutImagesMap.get(lookupKey);
+        //         }
+        //       }
+        //     }
+        //   }
+        // }
 
         // Update property with uploaded images and configurations
 
@@ -1107,9 +1109,9 @@ for (const { file, key } of layoutFiles) {
           updateData.images = backgroundUploadedImages;
         }
 
-        if (backgroundLayoutImagesMap.size > 0) {
-          updateData.configurations = configurations;
-        }
+        // if (backgroundLayoutImagesMap.size > 0) {
+        //   updateData.configurations = configurations;
+        // }
 
         if (Object.keys(updateData).length > 0) {
           await Property.findByIdAndUpdate(property._id, updateData, {
@@ -1238,7 +1240,7 @@ for (const { file, key } of layoutFiles) {
             );
           }
 
-          console.log("layoutPlanImages", layoutPlanImages);
+        //   console.log("layoutPlanImages", layoutPlanImages);
 
           return processedConfig;
         },
