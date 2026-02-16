@@ -399,9 +399,10 @@ exports.getTopVisitedProperties = async (req, res, next) => {
                     groupSize: property.minGroupMembers || 0,
                     openingLeft: Math.max(0, (property.minGroupMembers || 0) - activeLeadsCount),
                     targetPrice: {
-                        value: minPrice,
-                        formatted: formatPrice(minPrice)
-                    },
+    value: offerPriceNum || devPriceNum || 0,
+    formatted: formatPrice(offerPriceNum || devPriceNum || 0)
+},
+
                     developerPrice: {
                         value: devPriceNum,
                         formatted: formatPrice(devPriceNum)
