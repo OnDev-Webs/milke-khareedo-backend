@@ -1269,7 +1269,7 @@ exports.getPropertyById = async (req, res, next) => {
 
         const property = await Property.findById(id)
             .populate('developer', 'developerName description city establishedYear totalProjects logo website sourcingManager')
-            .populate('relationshipManager', 'name email phone')
+            .populate('relationshipManager', 'name email phone profileImage')
             .populate('leadDistributionAgents', 'name email phone')
             .lean();
 
@@ -1485,7 +1485,8 @@ exports.getPropertyById = async (req, res, next) => {
                 id: property.relationshipManager._id,
                 name: property.relationshipManager.name,
                 email: property.relationshipManager.email,
-                phone: property.relationshipManager.phone
+                phone: property.relationshipManager.phone,
+                profileImage: property.relationshipManager.profileImage
             } : null,
             configurations: property.configurations ? property.configurations.map(config => {
                 if (config.subConfigurations && Array.isArray(config.subConfigurations)) {
